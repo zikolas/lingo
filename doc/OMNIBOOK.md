@@ -90,7 +90,37 @@ Two compatibility myths this bust:
   embedded CIS declares 12 MB) boots fine. The spare 4 MB sits ignored —
   or available for our own second-drive experiments.
 
-## The D-slot compatibility checklist
+## Revision: the word-only ROM card that boots anyway
+
+A later find forced a refinement. The **OB430's own English system card**
+(2.0S, a ~400 K **FAT12** DOS volume — `OMNIBOOKROM`, IO.SYS, HP's card
+tools — not FFS2 like the German 12 MB card from the OB425) turns out to be
+**word-only in our socket, and its OmniBook boots it happily**. Same D slot,
+three verdicts:
+
+| Card | Access | Content | OB430 |
+|---|---|---|---|
+| English 2.0S factory ROM card | word-only | FAT12, 400 K | boots |
+| PRETEC clone | byte-accessible | German FFS2 image | boots |
+| VS200 clone | word-only | German FFS2 image (byte-identical to the PRETEC's) | hangs POST |
+
+So byte-accessibility is **not** a slot-level absolute — the OmniBook can
+evidently read cards with word cycles and mux bytes internally. The
+hypothesis that fits all three results: when a card's fixed **attribute CIS
+announces flash** (as the VS200's does), the firmware takes a flash-aware
+path that issues **byte-wise flash commands** — scrambled on a word-only
+card, wedging POST. Factory ROM cards never trigger it; byte-accessible
+flash survives it. Untested prediction: the VS200 would hang even carrying
+the English FAT12 image.
+
+Practical consequence: unchanged. For *clone targets* (which are flash by
+nature), **byte-accessible remains the proven recipe** — the checklist
+below stands. But D-card *content* comes in at least two generations, and
+the FAT12 kind is far easier to build custom images for than FFS2. The
+430 also happily boots the 425's German image via the PRETEC, so images
+travel across the 425/430 family.
+
+## The D-slot compatibility checklist (for flash clone targets)
 
 A candidate card qualifies if and only if:
 
@@ -130,9 +160,17 @@ verification across the serial link.
 | Smart Modular 20 MB (SM9FA520) | A1/A2 address lines bridged (wired-AND) — hardware-dead. Scrapped. |
 | PRETEC Series-2 16 MB | **Boots the OmniBook.** The proven recipe. |
 | Apple Newton 4 MB (AMD 01/3D) | Healthy, blank, byte-accessible — too small for this job. |
+| 2 MB SRAM card | Battery-backed, healthy; bit-rotted DOS ghost. Parked as the D-slot lab card (`SRAM-DSLOT.md`). |
+| OB430 English 2.0S ROM card | Word-only, FAT12, 400 K, HP card tools aboard (`OBCRDDRV`, `OBFDISK`, `FORMAT`, `LLREMOTE`). Boots its machine — see the Revision section. Dumped: `obrom.img`. |
 
 ## Open threads
 
+- **The FAT12 fast lane**: the 2.0S generation proves plain FAT12 D cards
+  are valid — custom images become mtools territory (HP CIS header + boot
+  sector + files), no FFS2 archaeology required. HP's own `OBCRDDRV`/
+  `OBFDISK`/`FORMAT` from the English card are the factory tooling.
+- Test the flash-probe hypothesis: does the VS200 hang even with the
+  English FAT12 image aboard?
 - **FFS2 format analysis** of the master image → truly custom application
   cards, not just clones.
 - The spare region above the image on oversized cards → a read-only second
