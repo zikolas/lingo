@@ -1,4 +1,4 @@
-# LFLASH — a PCMCIA linear flash / SRAM card reader-writer for DOS
+# FLINGO — a PCMCIA linear flash / SRAM card reader-writer for DOS
 
 A DOS tool that reads, writes, erases and identifies **linear memory
 PC Cards** — Intel-style linear flash cards (28F008SA family and friends),
@@ -22,14 +22,14 @@ In the CISDUMP tradition:
   SRAM card are saved and restored.
 - Memory windows are **borrowed** from the controller's free windows, saved,
   and restored exactly. A card found already powered stays powered; only a
-  card LFLASH powered up itself is powered back down.
+  card FLINGO powered up itself is powered back down.
 - WRITE shows a full plan (chip, blocks to be erased, Vpp) and asks before
   touching anything (`/Y` skips the prompt for scripted use).
 
 ## Usage
 
 ```
-LFLASH [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
+FLINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
 
   INFO [/PROBE]     socket + CIS facts; /PROBE adds live chip id (default)
   READ  file        dump card -> file (read-only)
@@ -44,18 +44,23 @@ LFLASH [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
   /TYPE t           force INTEL / AMD / SRAM
   /X1 /X2           force chip interleave (byte lanes)
   /VPP 5|12         programming voltage override
+  /W8               plain 8-bit window cycles only
+  /W16              force word-only card handling (see below)
+  /WS n             force n window wait states (0-3; default: auto-tuned)
+  /NOBUF            no 0xE8 buffered writes
+  /NOCRC            skip the CRC-32 on READ
   /NOERASE /NOVERIFY /ALL /SEG n /Y
 ```
 
 Examples:
 
 ```
-LFLASH /PROBE                     what's in the socket?
-LFLASH READ CARD.IMG              dump the whole card (size from CIS)
-LFLASH READ CARD.IMG /LEN 2M      dump a blank-CIS card
-LFLASH WRITE IMAGE.BIN /Y         burn an image, verify, no questions
-LFLASH ERASE /ALL                 wipe the card
-LFLASH VERIFY IMAGE.BIN           is the card still the image?
+FLINGO /PROBE                     what's in the socket?
+FLINGO READ CARD.IMG              dump the whole card (size from CIS)
+FLINGO READ CARD.IMG /LEN 2M      dump a blank-CIS card
+FLINGO WRITE IMAGE.BIN /Y         burn an image, verify, no questions
+FLINGO ERASE /ALL                 wipe the card
+FLINGO VERIFY IMAGE.BIN           is the card still the image?
 ```
 
 READ/WRITE print a **CRC-32** of the data moved — handy for end-to-end
@@ -63,16 +68,30 @@ verification against the file on the other side of a serial link.
 
 ## What it knows
 
-- **Intel CUI flash** (28F008SA, Sharp LH28F008SA, 28F016SA, …): block
-  erase + byte program with status polling; Vpp 12 V switched on only during
-  program/erase and restored after. Interleaved two-chip cards (x2) are
-  detected automatically, including the doubled 128 K erase blocks.
+- **Intel CUI flash** (28F008SA, Sharp LH28F008SA, 28F016 S-series, …):
+  block erase + program with status polling; Vpp 12 V switched on only
+  during program/erase and restored after (5 V-only parts stay at 5 V).
+  Where the chip's CFI advertises a write buffer, programming uses fast
+  buffered `0xE8` bursts.
+- **Chip organization, detected live**: single x8 chips, two x8 chips
+  interleaved on the byte lanes, and word-organized x16 parts each get the
+  correct command addressing, status masks and erase-block geometry, driven
+  through 16-bit window cycles when the socket supports them (both chips of
+  a pair program in parallel).
+- **Word-only cards**: some cards (e.g. Intel Value Series 200) ignore `A0`
+  and cannot do byte cycles at all — byte reads silently double every even
+  byte and byte writes corrupt. FLINGO detects this and switches everything
+  to word cycles; any byte-oriented tool would trash such a card.
+- **Slow cards**: window wait states are auto-tuned against stale-read
+  behavior on tight back-to-back cycles (`/WS` overrides).
 - **AMD-style flash** (Am29F040/080/016, Fujitsu, ST, …): unlock-sequence
   command set, DQ7/DQ5 polling, both x8 and x16-in-byte-mode unlock address
   layouts, single or interleaved.
 - **SRAM** cards: plain writes, battery status (BVD) reported.
 - **Identification**: CIS `DEVICE`/`JEDEC` tuples, JEDEC autoselect, CFI
-  query, plus overrides for cards with a blank CIS.
+  query, plus overrides for cards with a blank CIS. The same probes make a
+  handy card-triage instrument: address-line faults and dead cards show
+  distinctive fingerprints in seconds.
 - Intel **Series 1** (28F010/020, pre-CUI) cards are detected and readable
   but not programmable (they need the old erase-verify algorithm).
 
@@ -90,11 +109,15 @@ verification against the file on the other side of a serial link.
 
 ## Build
 
-Open Watcom 1.9, 16-bit real mode, small model:
+Open Watcom 1.9, 16-bit real mode, small model — `BUILD.BAT`, or:
 
 ```
-wcc -ms LFLASH.C -fo=LFLASH.obj
-wlink system dos name LFLASH.exe file LFLASH.obj
+wcc -ms -ox FLINGO.C -fo=FLINGO.obj
+wlink system dos name FLINGO.exe file FLINGO.obj
 ```
 
-(or `BUILD.BAT` / the on-box `C:\WATCOM\BLD.BAT LFLASH`).
+## The name
+
+**FL**ash + **LIN**ear + **GO**, and it speaks every card's *lingo* —
+Intel CUI, AMD unlock sequences, word-only, byte-only, slow, interleaved.
+Also, inescapably: 🦩

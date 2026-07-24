@@ -1,4 +1,4 @@
-/* LFLASH.C - PCMCIA linear flash / SRAM memory card reader-writer for DOS.
+/* FLINGO.C - PCMCIA linear flash / SRAM memory card reader-writer for DOS.
  * Drives the card directly through an Intel 82365-class PCIC at 0x3E0 (no Card
  * Services needed). Reads any memory card raw; identifies flash chips via the
  * CIS, JEDEC autoselect and CFI; erases + programs Intel CUI flash (28F008SA
@@ -7,7 +7,7 @@
  * saved/restored, a card found powered is left exactly as found, and the
  * default READ / INFO paths never write a single byte to the card.
  *
- * Usage:  LFLASH [command] [file] [options]
+ * Usage:  FLINGO [command] [file] [options]
  *   INFO             show socket + CIS + card facts (default command)
  *        /PROBE      also identify the chip live (JEDEC/CFI/SRAM probe -
  *                    writes ID commands to the card, restores SRAM bytes)
@@ -31,7 +31,7 @@
  *   /Y               don't ask for confirmation
  *   numbers take hex (0x...) and K/M suffixes, e.g. /OFF 0x20000 /LEN 512K
  *
- * Build: C:\WATCOM\BLD.BAT LFLASH   (Open Watcom 1.9, wcc -ms, C89)
+ * Build: BUILD.BAT   (Open Watcom 1.9, wcc -ms -ox, C89)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,6 +62,22 @@ static unsigned o_seg = 0xD000;
 static unsigned long o_off = 0, o_len = 0, o_size = 0, o_blk = 0;
 static int o_type = 0, o_lanes = 0, o_vpp = -1;
 static int o_yes = 0, o_noerase = 0, o_noverify = 0, o_probe = 0, o_all = 0;
+static int o_w8 = 0;          /* /W8: force 8-bit window ops              */
+static int o_w16 = 0;         /* /W16: force word-only card handling      */
+static int o_ws = -1;         /* /WS n: force n window wait states (0-3)  */
+static int cur_ws = 0;        /* wait states currently on the windows     */
+static int o_nocrc = 0;       /* /NOCRC: skip CRC-32 on READ              */
+static int o_nobuf = 0;       /* /NOBUF: no 0xE8 buffered writes          */
+static int use16 = 0;         /* 16-bit data window verified working      */
+static int byte_broken = 0;   /* word-only card: byte reads double the even
+                                 byte, byte writes all land on the low lane
+                                 (card ignores A0) - ALL ops must be words */
+
+/* chip organization behind the socket */
+#define ORG_X8   0            /* single byte-wide chip                    */
+#define ORG_PAIR 1            /* two x8 chips interleaved on byte lanes   */
+#define ORG_X16  2            /* word-organized chip (x16)                */
+static int org = ORG_X8;
 
 /* ---- card facts (probe results / overrides) ------------------------------ */
 static int ctype = T_UNKNOWN;
@@ -75,6 +91,7 @@ static unsigned long card_size = 0;       /* total card bytes; 0 = unknown   */
 static int need_vpp12 = 0;
 static unsigned amd_a1 = 0x555, amd_a2 = 0x2AA;
 static unsigned long cfi_size = 0, cfi_blk = 0;
+static unsigned cfi_bufsz = 0;            /* per-chip write buffer, bytes    */
 
 /* ---- CIS facts ----------------------------------------------------------- */
 static int cis_present = 0;
@@ -121,8 +138,23 @@ static void initwin(int w)
     int b = winreg[w], i;
     for (i = 0; i < 6; i++) svwin[w][i] = rd(b + i);
     wr(b + 0, start & 0xFF); wr(b + 1, (start >> 8) & 0x3F);
-    wr(b + 2, stop  & 0xFF); wr(b + 3, (stop  >> 8) & 0x3F);
+    wr(b + 2, stop  & 0xFF);
+    wr(b + 3, ((stop >> 8) & 0x3F) | (cur_ws << 6));
     setwin(w, 0L, 0);
+}
+
+/* stop-high bits 7:6 add wait states to the window's 16-bit cycles - slow
+ * cards return STALE data on tight back-to-back reads without them */
+static void apply_ws(int ws)
+{
+    int w;
+    unsigned stop;
+    cur_ws = ws;
+    for (w = 0; w < 2; w++) {
+        stop = (winseg[w] >> 8) + 3;
+        wr(winreg[w] + 3, ((stop >> 8) & 0x3F) | (ws << 6));
+    }
+    dly(100);
 }
 
 static volatile unsigned char __far *wp8(int w, unsigned off)
@@ -134,6 +166,63 @@ static volatile unsigned char __far *cmem(unsigned long addr)
     unsigned long page = addr & 0xFFFFC000L;
     if (page != cur_pageB) { setwin(1, page, 0); cur_pageB = page; }
     return wp8(1, (unsigned)(addr & 0x3FFFL));
+}
+
+/* word access (addr must be even) - only used once use16 is verified */
+static volatile unsigned short __far *cmem16(unsigned long addr)
+{
+    unsigned long page = addr & 0xFFFFC000L;
+    if (page != cur_pageB) { setwin(1, page, 0); cur_pageB = page; }
+    return (volatile unsigned short __far *)
+           MK_FP(winseg[1], (unsigned)(addr & 0x3FFEL));
+}
+
+/* flip window 1 between 8-bit and 16-bit data cycles */
+static void win1_datasize(int wide)
+{
+    unsigned start = winseg[1] >> 8;
+    wr(winreg[1] + 1, ((start >> 8) & 0x3F) | (wide ? 0x80 : 0x00));
+    dly(100);
+}
+
+/* Work out how this socket+card combination can be accessed. Read-only.
+ * Three outcomes:
+ *   use16=1                 word cycles agree with byte cycles: use words
+ *                           for speed, bytes stay valid
+ *   use16=1, byte_broken=1  WORD-ONLY card (ignores A0): byte reads double
+ *                           the even byte - words are the only truth
+ *   use16=0                 16-bit window cycles don't work on this socket
+ * The classic word-only signature: byte view has every odd byte mirroring
+ * its even neighbour while the word view shows real distinct high bytes,
+ * and the even bytes agree between the views. /W8 and /W16 override.       */
+static void detect_w16(void)
+{
+    int i, same = 1, doubled = 1, wordable = 0;
+    unsigned char b8[64];
+    unsigned short w16[32];
+    use16 = 0; byte_broken = 0;
+    if (o_w8) return;
+    if (o_w16) { win1_datasize(1); use16 = 1; byte_broken = 1; return; }
+    for (i = 0; i < 64; i++) b8[i] = *cmem((unsigned long)i);
+    win1_datasize(1);
+    for (i = 0; i < 32; i++) w16[i] = *cmem16((unsigned long)i * 2);
+    for (i = 0; i < 32; i++) {
+        if ((unsigned char)(w16[i] & 0xFF) != b8[i * 2] ||
+            (unsigned char)(w16[i] >> 8)   != b8[i * 2 + 1]) { same = 0; break; }
+    }
+    if (same) { use16 = 1; return; }
+    for (i = 0; i < 32; i++) {
+        if (b8[i * 2] != b8[i * 2 + 1]) { doubled = 0; break; }
+        if ((unsigned char)(w16[i] & 0xFF) != b8[i * 2]) { doubled = 0; break; }
+    }
+    for (i = 0; i < 32; i++)
+        if ((unsigned char)(w16[i] & 0xFF) != (unsigned char)(w16[i] >> 8))
+            wordable = 1;
+    if (doubled && wordable) {
+        use16 = 1; byte_broken = 1;
+        return;
+    }
+    win1_datasize(0);
 }
 
 static int open_socket(void)
@@ -357,6 +446,7 @@ static int try_intel(int force)
     if (m0 == m1 && d0 == d1) { nlanes = 2; id_mfr = m0; id_dev = d0; }
     else                      { nlanes = 1; id_mfr = m0; id_dev = m1; }
     if (o_lanes) nlanes = o_lanes;
+    org = (nlanes == 2) ? ORG_PAIR : ORG_X8;
     return 1;
 }
 
@@ -422,6 +512,63 @@ static int try_sram(void)
     return 1;
 }
 
+/* word-cycle probes: valid for x8 pairs AND x16 word-organized chips, and
+ * the only correct probes on a word-only (A0-ignoring) card. The ID word
+ * tells the organization apart: a pair mirrors the mfr on both lanes
+ * (0x8989), an x16 chip returns 0x0089.                                    */
+static int try_intel_w(int force)
+{
+    volatile unsigned short __far *p = cmem16(0L);
+    unsigned short w0, w1;
+    p[0] = 0xFFFF; p[1] = 0xFFFF; dly(100);
+    p[0] = 0x9090; p[1] = 0x9090; dly(100);
+    w0 = p[0]; w1 = p[1];
+    p[0] = 0xFFFF; p[1] = 0xFFFF; dly(100);
+    if (!force && (w0 & 0xFF) != 0x89 && (w0 & 0xFF) != 0xB0) return 0;
+    id_mfr = (unsigned char)(w0 & 0xFF);
+    if ((w0 >> 8) == (w0 & 0xFF)) {
+        org = ORG_PAIR; nlanes = 2;                  /* mfr on both lanes    */
+        id_dev = (unsigned char)(w1 & 0xFF);
+    } else if ((w0 >> 8) == 0) {
+        org = ORG_X16; nlanes = 1;                   /* x16: mfr word 0089   */
+        id_dev = (unsigned char)(w1 & 0xFF);
+    } else {
+        org = ORG_X8; nlanes = 1;                    /* single x8: dev rides */
+        id_dev = (unsigned char)(w0 >> 8);           /* the odd byte cycle   */
+    }
+    if (o_lanes == 2) { org = ORG_PAIR; nlanes = 2; }
+    if (o_lanes == 1 && org == ORG_PAIR) { org = ORG_X8; nlanes = 1; }
+    return 1;
+}
+
+static int try_cfi_w(void)
+{
+    unsigned short q, r, y;
+    *cmem16(0x55UL * 2) = 0x9898; dly(50);
+    q = *cmem16(0x10UL * 2); r = *cmem16(0x11UL * 2); y = *cmem16(0x12UL * 2);
+    if ((q & 0xFF) == 'Q' && (r & 0xFF) == 'R' && (y & 0xFF) == 'Y') {
+        unsigned char n27 = (unsigned char)(*cmem16(0x27UL * 2) & 0xFF);
+        unsigned long zl = *cmem16(0x2FUL * 2) & 0xFF;
+        unsigned long zh = *cmem16(0x30UL * 2) & 0xFF;
+        unsigned char alg = (unsigned char)(*cmem16(0x13UL * 2) & 0xFF);
+        unsigned char bl  = (unsigned char)(*cmem16(0x2AUL * 2) & 0xFF);
+        cfi_size = (n27 && n27 < 27) ? (1UL << n27) : 0;
+        cfi_blk  = ((zh << 8) | zl) * 256UL;
+        cfi_bufsz = (bl && bl < 8) ? (1U << bl) : 0;
+        if (cfi_bufsz > 32) cfi_bufsz = 32;
+        *cmem16(0L) = 0xFFFF; dly(20);
+        *cmem16(0L) = 0xF0F0; dly(20);
+        if (ctype == T_UNKNOWN) {
+            if (alg == 1 || alg == 3) ctype = T_INTEL;
+            else if (alg == 2)        ctype = T_AMD;
+        }
+        return 1;
+    }
+    *cmem16(0L) = 0xFFFF; dly(20);
+    *cmem16(0L) = 0xF0F0; dly(20);
+    return 0;
+}
+
 static int try_cfi(void)
 {
     static unsigned strides[3] = { 1, 2, 4 };
@@ -434,8 +581,11 @@ static int try_cfi(void)
             unsigned char n27 = *wp8(0, 0x27 * s);
             unsigned long zl = *wp8(0, 0x2F * s), zh = *wp8(0, 0x30 * s);
             unsigned char alg = *wp8(0, 0x13 * s);
+            unsigned char bl  = *wp8(0, 0x2A * s);
             cfi_size = (n27 && n27 < 27) ? (1UL << n27) : 0;
             cfi_blk  = ((zh << 8) | zl) * 256UL;
+            cfi_bufsz = (bl && bl < 8) ? (1U << bl) : 0;
+            if (cfi_bufsz > 32) cfi_bufsz = 32;
             *wp8(0, 0) = 0xFF; dly(20);
             *wp8(0, 0) = 0xF0; dly(20);
             if (ctype == T_UNKNOWN) {
@@ -475,7 +625,7 @@ static void probe_card(void)
     /* fresh state per socket */
     ctype = T_UNKNOWN; nlanes = 1; id_mfr = id_dev = 0;
     chip_name = "unknown"; chip_kb = 0; blkkb = 0;
-    cfi_size = 0; cfi_blk = 0; need_vpp12 = 0;
+    cfi_size = 0; cfi_blk = 0; cfi_bufsz = 0; need_vpp12 = 0;
     amd_a1 = 0x555; amd_a2 = 0x2AA;
 
     if (rd(0x01) & 0x10) {
@@ -493,23 +643,33 @@ static void probe_card(void)
     if (o_type == T_SRAM) {
         ctype = T_SRAM;
     } else if (o_type == T_INTEL) {
-        ctype = T_INTEL; try_intel(1);
+        ctype = T_INTEL;
+        if (use16) try_intel_w(1); else try_intel(1);
     } else if (o_type == T_AMD) {
         ctype = T_AMD; try_amd(1);
     } else {
-        if (cis_dtype == 6 && try_sram()) ctype = T_SRAM;
-        if (ctype == T_UNKNOWN && try_intel(0)) ctype = T_INTEL;
-        if (ctype == T_UNKNOWN && try_amd(0))   ctype = T_AMD;
-        if (ctype == T_UNKNOWN) try_cfi();
-        if (ctype == T_UNKNOWN && try_sram())   ctype = T_SRAM;
+        if (cis_dtype == 6 && !byte_broken && try_sram()) ctype = T_SRAM;
+        if (ctype == T_UNKNOWN) {
+            if (use16) { if (try_intel_w(0)) ctype = T_INTEL; }
+            else       { if (try_intel(0))   ctype = T_INTEL; }
+        }
+        if (ctype == T_UNKNOWN && !byte_broken && try_amd(0)) ctype = T_AMD;
+        if (ctype == T_UNKNOWN) {
+            if (use16) { if (!try_cfi_w() && !byte_broken) try_cfi(); }
+            else try_cfi();
+        }
+        if (ctype == T_UNKNOWN && !byte_broken && try_sram()) ctype = T_SRAM;
         if (ctype == T_UNKNOWN) {
             unsigned char a = *wp8(0, 0), b;
             dly(100); b = *wp8(0, 0);
             if (a == b) ctype = T_ROM;
         }
     }
-    if ((ctype == T_INTEL || ctype == T_AMD) && !cfi_size) try_cfi();
-    if (ctype == T_SRAM || ctype == T_ROM || ctype == T_UNKNOWN)
+    if ((ctype == T_INTEL || ctype == T_AMD) && !cfi_size) {
+        if (use16 && org != ORG_X8) { if (!try_cfi_w() && !byte_broken) try_cfi(); }
+        else try_cfi();
+    }
+    if ((ctype == T_SRAM || ctype == T_ROM || ctype == T_UNKNOWN) && !byte_broken)
         restore_probe_bytes();
     resolve_geom();
 }
@@ -526,15 +686,26 @@ static const char *type_name(int t)
     }
 }
 
+static const char *orgname(void)
+{
+    if (org == ORG_PAIR) return "x8 pair";
+    if (org == ORG_X16)  return "x16 word";
+    return "x8";
+}
+
 static void show_probe(void)
 {
     printf("    PROBE: %s", type_name(ctype));
     if (ctype == T_INTEL || ctype == T_AMD || ctype == T_SERIES1) {
-        printf(", id %02X/%02X = %s x%d", id_mfr, id_dev, chip_name, nlanes);
+        printf(", id %02X/%02X = %s %s", id_mfr, id_dev, chip_name, orgname());
         if (blk_bytes) printf(", block %luK", blk_bytes >> 10);
         if (ctype == T_INTEL) printf(", Vpp %s", need_vpp12 ? "12V" : "5V");
     }
-    if (cfi_size) printf(" [CFI: chip %luK blk %luK]", cfi_size >> 10, cfi_blk >> 10);
+    if (cfi_size) {
+        printf(" [CFI: chip %luK blk %luK", cfi_size >> 10, cfi_blk >> 10);
+        if (cfi_bufsz) printf(" buf %u", cfi_bufsz);
+        printf("]");
+    }
     printf("\n");
     if (card_size) printf("    SIZE: %luK%s\n", card_size >> 10,
                           (!o_size && !cis_size) ? " (from chip id - multi-bank cards may be larger)" : "");
@@ -571,6 +742,88 @@ static int intel_erase_blk(unsigned long baddr)
         *p = 0x50; *p = 0xFF;
         if (sr & 0x28) return sr;                    /* erase fail / Vpp    */
     }
+    return 0;
+}
+
+/* -- wide (16-bit window) Intel fast paths: one word cycle commands a whole
+ *    x8 pair (program/erase overlapping) or a word-organized x16 chip ----- */
+
+/* status masks: a pair answers on both byte lanes, an x16 chip on the low
+ * byte only (high byte undefined on status reads) */
+static unsigned srdy(void)  { return (org == ORG_X16) ? 0x0080U : 0x8080U; }
+static unsigned seprog(void){ return (org == ORG_X16) ? 0x0038U : 0x3838U; }
+static unsigned serase(void){ return (org == ORG_X16) ? 0x0028U : 0x2828U; }
+/* write-buffer count: pair = per-chip BYTES-1 on each lane; x16 = WORDS-1 */
+static unsigned short countw(unsigned words)
+{
+    unsigned c = words - 1;
+    return (org == ORG_X16) ? (unsigned short)c
+                            : (unsigned short)((c << 8) | c);
+}
+
+static int intel_progw(unsigned long addr, unsigned val16)
+{
+    volatile unsigned short __far *p = cmem16(addr);
+    unsigned n, sr = 0, rdy = srdy();
+    *p = 0x4040; *p = val16;
+    for (n = 0; n < 60000U; n++) { sr = *p; if ((sr & rdy) == rdy) break; }
+    if ((sr & rdy) != rdy) return -1;
+    if (sr & seprog()) return (int)sr;               /* fail/Vpp             */
+    return 0;
+}
+
+static int intel_erase_blkw(unsigned long baddr)
+{
+    volatile unsigned short __far *p = cmem16(baddr);
+    unsigned long t0 = ticks();
+    unsigned sr, rdy = srdy();
+    *p = 0x2020; *p = 0xD0D0;
+    for (;;) {
+        sr = *p;
+        if ((sr & rdy) == rdy) break;
+        if (ticks() - t0 > 728UL) { *p = 0x5050; *p = 0xFFFF; return -1; }
+    }
+    *p = 0x5050; *p = 0xFFFF;
+    if (sr & serase()) return (int)sr;
+    return 0;
+}
+
+/* program one byte through the word engine: partner byte rides along as
+ * 0xFF (programming 0xFF clears no bits, so it is untouched) */
+static int intel_progw_byte(unsigned long addr, unsigned char val)
+{
+    unsigned w = (addr & 1) ? (((unsigned)val << 8) | 0x00FF)
+                            : (0xFF00 | val);
+    return intel_progw(addr & ~1UL, w);
+}
+
+static int wide_ok(void)                             /* word engine usable?  */
+{
+    return use16 && ctype == T_INTEL &&
+           (org == ORG_PAIR || org == ORG_X16) && (o_off & 1) == 0;
+}
+
+/* buffered word write ('write to buffer', 0xE8): cnt words (<=32) starting
+ * at even 64-aligned addr, never crossing an erase block; both chips' write
+ * buffers load in parallel and program as ONE internal operation each -
+ * an order of magnitude faster than per-byte programming on 5V silicon.
+ * Returns -3 if the chip never offers a buffer (caller falls back).       */
+static int intel_bufw(unsigned long addr, unsigned short *src, unsigned cnt)
+{
+    volatile unsigned short __far *p = cmem16(addr);
+    unsigned n, sr = 0, rdy = srdy();
+    unsigned short cw = countw(cnt);
+    for (n = 0; n < 60000U; n++) {
+        *p = 0xE8E8; sr = *p;
+        if ((sr & rdy) == rdy) break;
+    }
+    if ((sr & rdy) != rdy) { *p = 0x5050; *p = 0xFFFF; return -3; }
+    *p = cw;
+    for (n = 0; n < cnt; n++) p[n] = src[n];
+    *p = 0xD0D0;
+    for (n = 0; n < 60000U; n++) { sr = *p; if ((sr & rdy) == rdy) break; }
+    if ((sr & rdy) != rdy) return -1;
+    if (sr & seprog()) return (int)sr;               /* prog/erase/Vpp bits  */
     return 0;
 }
 
@@ -647,10 +900,15 @@ static void read_array_range(unsigned long start, unsigned long end)
     unsigned long step = blk_bytes ? blk_bytes : (0x10000UL * nlanes);
     unsigned long a = start - (start % step);
     for (;;) {
-        int l;
-        for (l = 0; l < nlanes; l++) {
-            if (ctype == T_INTEL) { *cmem(a + l) = 0x50; *cmem(a + l) = 0xFF; }
-            else if (ctype == T_AMD) *cmem(a + l) = 0xF0;
+        if (use16) {
+            if (ctype == T_INTEL) { *cmem16(a) = 0x5050; *cmem16(a) = 0xFFFF; }
+            else if (ctype == T_AMD) *cmem16(a) = 0xF0F0;
+        } else {
+            int l;
+            for (l = 0; l < nlanes; l++) {
+                if (ctype == T_INTEL) { *cmem(a + l) = 0x50; *cmem(a + l) = 0xFF; }
+                else if (ctype == T_AMD) *cmem(a + l) = 0xF0;
+            }
         }
         if (a + step > end) break;
         a += step;
@@ -660,7 +918,10 @@ static void read_array_range(unsigned long start, unsigned long end)
 
 static int erase_block(unsigned long addr)
 {
-    if (ctype == T_INTEL) return intel_erase_blk(addr);
+    if (ctype == T_INTEL) {
+        if (wide_ok()) return intel_erase_blkw(addr);
+        return intel_erase_blk(addr);
+    }
     if (ctype == T_AMD)   return amd_erase_blk(addr);
     return 0;
 }
@@ -703,9 +964,54 @@ static void card_to_buf(unsigned long addr, unsigned char *dst, unsigned n)
         unsigned run = (unsigned)(0x4000 - off);
         if (run > n) run = n;
         cmem(addr);
-        _fmemcpy(dst, MK_FP(winseg[1], off), run);
+        if (use16 && (off & 1) == 0) {
+            /* word cycles: two card bytes per bus access, unrolled */
+            volatile unsigned short __far *s =
+                (volatile unsigned short __far *)MK_FP(winseg[1], off);
+            unsigned short *d = (unsigned short *)dst;
+            unsigned w = run >> 1;
+            while (w >= 8) {
+                d[0]=s[0]; d[1]=s[1]; d[2]=s[2]; d[3]=s[3];
+                d[4]=s[4]; d[5]=s[5]; d[6]=s[6]; d[7]=s[7];
+                d += 8; s += 8; w -= 8;
+            }
+            while (w--) *d++ = *s++;
+            if (run & 1)                             /* odd tail: low byte   */
+                dst[run - 1] = (unsigned char)(s[0] & 0xFF);
+        } else {
+            _fmemcpy(dst, MK_FP(winseg[1], off), run);
+        }
         addr += run; dst += run; n -= run;
     }
+}
+
+/* slow cards return stale data on tight back-to-back window cycles: compare
+ * well-paced reference reads against the tight bulk path, adding window
+ * wait states until they agree (/WS n forces a level)                       */
+static void tune_ws(void)
+{
+    unsigned char ref[64], t[64];
+    int i, ws;
+    if (!use16) return;
+    if (o_ws >= 0) { apply_ws(o_ws & 3); }
+    else {
+        for (ws = cur_ws; ; ws++) {
+            apply_ws(ws);
+            for (i = 0; i < 32; i++) {           /* paced words = the truth */
+                unsigned short v = *cmem16((unsigned long)i * 2);
+                ref[i * 2]     = (unsigned char)(v & 0xFF);
+                ref[i * 2 + 1] = (unsigned char)(v >> 8);
+                dly(5);
+            }
+            card_to_buf(0L, t, 64);              /* the tight path          */
+            if (memcmp(ref, t, 64) == 0) break;
+            if (ws >= 3) {
+                printf("  ! reads unstable even at 3 wait states - data suspect\n");
+                break;
+            }
+        }
+    }
+    if (cur_ws) printf("  [window: +%d wait state(s) for this card]\n", cur_ws);
 }
 
 static void buf_to_card(unsigned long addr, unsigned char *src, unsigned n)
@@ -715,13 +1021,27 @@ static void buf_to_card(unsigned long addr, unsigned char *src, unsigned n)
         unsigned run = (unsigned)(0x4000 - off);
         if (run > n) run = n;
         cmem(addr);
-        _fmemcpy(MK_FP(winseg[1], off), src, run);
+        if (use16 && (off & 1) == 0) {
+            volatile unsigned short __far *d =
+                (volatile unsigned short __far *)MK_FP(winseg[1], off);
+            unsigned short *s = (unsigned short *)src;
+            unsigned w = run >> 1;
+            while (w--) *d++ = *s++;
+            if (run & 1) {                           /* odd tail: RMW word   */
+                unsigned short v = *d;
+                *d = (unsigned short)((v & 0xFF00) | src[run - 1]);
+            }
+        } else {
+            _fmemcpy(MK_FP(winseg[1], off), src, run);
+        }
         addr += run; src += run; n -= run;
     }
 }
 
+/* throttled: only every 256K (or at the end) - console output costs time */
 static void progress(const char *what, unsigned long done, unsigned long total)
 {
+    if ((done & 0x3FFFFL) != 0 && done != total) return;
     printf("\r  %s %luK", what, done >> 10);
     if (total) printf(" / %luK", total >> 10);
     fflush(stdout);
@@ -742,15 +1062,20 @@ static long verify_range(FILE *f, unsigned long off, unsigned long len,
                          unsigned long *first_bad)
 {
     long bad = 0;
+    unsigned half = sizeof(buf) / 2;
+    unsigned char *cb = buf + half;                  /* card half            */
     unsigned long a = off, left = len, fb = 0xFFFFFFFFUL;
     while (left) {
-        unsigned n = (left > sizeof(buf)) ? sizeof(buf) : (unsigned)left;
+        unsigned n = (left > (unsigned long)half) ? half : (unsigned)left;
         unsigned got = fread(buf, 1, n, f), i;
         if (got == 0) break;
-        for (i = 0; i < got; i++) {
-            if (*cmem(a + i) != buf[i]) {
-                if (fb == 0xFFFFFFFFUL) fb = a + i;
-                bad++;
+        card_to_buf(a, cb, got);
+        if (memcmp(buf, cb, got) != 0) {
+            for (i = 0; i < got; i++) {
+                if (cb[i] != buf[i]) {
+                    if (fb == 0xFFFFFFFFUL) fb = a + i;
+                    bad++;
+                }
             }
         }
         a += got; left -= got;
@@ -782,6 +1107,11 @@ static int op_info(void)
 {
     show_status();
     if (!wait_ready()) { printf("  ! card never came READY\n"); return 1; }
+    detect_w16();
+    tune_ws();
+    printf("    window: %s\n",
+           byte_broken ? "16-bit (WORD-ONLY card - ignores A0 on byte cycles)"
+                       : use16 ? "16-bit OK (fast ops)" : "8-bit");
     read_cis();
     parse_cis(1);
     if (o_probe) {
@@ -816,7 +1146,7 @@ static int op_read(const char *fn)
     while (left) {
         unsigned n = (left > sizeof(buf)) ? sizeof(buf) : (unsigned)left;
         card_to_buf(a, buf, n);
-        crc_feed(buf, n);
+        if (!o_nocrc) crc_feed(buf, n);
         if (fwrite(buf, 1, n, f) != n) {
             printf("\n  ! write error on %s (disk full?)\n", fn);
             fclose(f); return 1;
@@ -825,7 +1155,8 @@ static int op_read(const char *fn)
         progress("read", a - o_off, len);
     }
     fclose(f);
-    printf("\n  done, CRC-32 %08lX\n", crc_done());
+    if (o_nocrc) printf("\n  done\n");
+    else printf("\n  done, CRC-32 %08lX\n", crc_done());
     return 0;
 }
 
@@ -834,7 +1165,7 @@ static int op_write(const char *fn)
     FILE *f;
     unsigned long flen, len, a, left, fb;
     long bad;
-    int r;
+    int r, use_buf;
 
     read_cis(); parse_cis(0);
     if (rd(0x01) & 0x10) {
@@ -842,6 +1173,11 @@ static int op_write(const char *fn)
         return 1;
     }
     probe_card();
+    use_buf = (cfi_bufsz >= 2 && (o_off & 63) == 0 && !o_nobuf);
+    if (byte_broken && ctype != T_INTEL && ctype != T_SRAM) {
+        printf("  ! word-only card: only Intel-CUI flash (or SRAM) writable\n");
+        return 1;
+    }
     if (ctype == T_UNKNOWN || ctype == T_ROM || ctype == T_SERIES1) {
         printf("  ! card is %s - cannot write (force with /TYPE if misdetected)\n",
                type_name(ctype));
@@ -874,6 +1210,7 @@ static int op_write(const char *fn)
                    b0, b1, blk_bytes >> 10);
         }
         if (ctype == T_INTEL) printf(", Vpp %s", need_vpp12 ? "12V" : "5V");
+        if (use_buf && wide_ok()) printf(", buffered x2");
     }
     printf("\n");
     if (!confirm()) { fclose(f); return 1; }
@@ -906,6 +1243,49 @@ static int op_write(const char *fn)
         crc_feed(buf, got);
         if (ctype == T_SRAM) {
             buf_to_card(a, buf, got);
+        } else if (wide_ok()) {
+            /* word path: program both interleaved chips in parallel,
+             * in buffered 32-word bursts when the chip offers a buffer */
+            unsigned short *bw = (unsigned short *)buf;
+            unsigned nw = got >> 1, k, span, allff;
+            unsigned span_max = (org == ORG_X16) ? (cfi_bufsz >> 1) : cfi_bufsz;
+            if (span_max < 1 || span_max > 32) span_max = 32;
+            r = 0;
+            i = 0;
+            while (i < nw) {
+                span = span_max;
+                if (nw - i < span) span = nw - i;
+                allff = 1;
+                for (k = 0; k < span; k++)
+                    if (bw[i + k] != 0xFFFF) { allff = 0; break; }
+                if (!allff) {
+                    if (use_buf) {
+                        r = intel_bufw(a + (unsigned long)i * 2, bw + i, span);
+                        if (r == -3) { use_buf = 0; continue; }  /* fallback */
+                    } else {
+                        for (k = 0; k < span && !r; k++) {
+                            if (bw[i + k] == 0xFFFF) continue;
+                            r = intel_progw(a + (unsigned long)(i + k) * 2,
+                                            bw[i + k]);
+                        }
+                        if (r && k) i += k - 1;      /* point at the failure */
+                    }
+                    if (r) { i <<= 1; break; }
+                }
+                i += span;
+            }
+            if (!r && (got & 1)) {                   /* odd tail byte        */
+                i = got - 1;
+                if (buf[i] != 0xFF) r = intel_progw_byte(a + i, buf[i]);
+            }
+            if (r) {
+                printf("\n  ! program failed at 0x%lX (code %d%s)\n",
+                       a + i, r,
+                       (r > 0 && (r & 0x0808)) ?
+                       " - Vpp low, try /VPP 12" : "");
+                read_array_range(o_off, a + i);
+                vpp12(0); fclose(f); return 1;
+            }
         } else {
             for (i = 0; i < got; i++) {
                 if (buf[i] == 0xFF) continue;        /* erased state anyway */
@@ -1040,8 +1420,8 @@ static unsigned long parsenum(const char *s)
 
 static void usage(void)
 {
-    printf("LFLASH - PCMCIA linear flash / SRAM card reader-writer (82365 PCIC @ 3E0)\n");
-    printf("Usage: LFLASH [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]\n");
+    printf("FLINGO - PCMCIA linear flash / SRAM card reader-writer (82365 PCIC @ 3E0)\n");
+    printf("Usage: FLINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]\n");
     printf("  INFO [/PROBE]     card facts; /PROBE = live chip id (default cmd)\n");
     printf("  READ file         dump card to file (read-only, no probe)\n");
     printf("  WRITE file        erase + program + verify file onto card\n");
@@ -1050,6 +1430,7 @@ static void usage(void)
     printf("Options: /S n socket, /OFF n, /LEN n, /SIZE n, /BLK n (nums: 0x.., K, M)\n");
     printf("  /TYPE INTEL|AMD|SRAM, /X1 /X2 lanes, /VPP 5|12, /SEG n (def D000)\n");
     printf("  /NOERASE /NOVERIFY /ALL /Y (no confirm)\n");
+    printf("  /W8 (no 16-bit cycles) /W16 (force word-only) /WS n /NOBUF /NOCRC\n");
     printf("Supports: Intel 28F008SA-family cards (12V Vpp), AMD 29F-style, SRAM.\n");
 }
 
@@ -1087,6 +1468,11 @@ int main(int argc, char **argv)
             }
             else if (!stricmp(a, "X1")) o_lanes = 1;
             else if (!stricmp(a, "X2")) o_lanes = 2;
+            else if (!stricmp(a, "W8")) o_w8 = 1;
+            else if (!stricmp(a, "W16")) o_w16 = 1;
+            else if (!stricmp(a, "WS")) { if (i+1 < argc) o_ws = atoi(argv[++i]) & 3; }
+            else if (!stricmp(a, "NOCRC")) o_nocrc = 1;
+            else if (!stricmp(a, "NOBUF")) o_nobuf = 1;
             else if (!stricmp(a, "NOERASE"))  o_noerase = 1;
             else if (!stricmp(a, "NOVERIFY")) o_noverify = 1;
             else if (!stricmp(a, "ALL")) o_all = 1;
@@ -1105,7 +1491,7 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LFLASH 1.0 - linear flash / SRAM card reader-writer\n");
+    printf("FLINGO 1.1 - linear flash / SRAM card reader-writer\n");
 
     /* PCIC sanity: identification register reads 0x8x on 82365-compatibles */
     sockoff = 0;
@@ -1140,6 +1526,16 @@ int main(int argc, char **argv)
         printf("  ! card never came READY - aborting\n");
         close_socket();
         return 1;
+    }
+    detect_w16();
+    tune_ws();
+    if (byte_broken) {
+        printf("  [word-only card: byte cycles ignore A0 - using 16-bit ops]\n");
+        if (o_off & 1) {
+            printf("  ! /OFF must be even on a word-only card\n");
+            close_socket();
+            return 1;
+        }
     }
 
     switch (cmd) {
