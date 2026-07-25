@@ -1,4 +1,4 @@
-# FLINGO — a PCMCIA linear flash / SRAM card reader-writer for DOS
+# LINGO — a PCMCIA linear flash / SRAM card reader-writer for DOS
 
 A DOS tool that reads, writes, erases and identifies **linear memory
 PC Cards** — Intel-style linear flash cards (28F008SA family and friends),
@@ -22,14 +22,14 @@ In the CISDUMP tradition:
   SRAM card are saved and restored.
 - Memory windows are **borrowed** from the controller's free windows, saved,
   and restored exactly. A card found already powered stays powered; only a
-  card FLINGO powered up itself is powered back down.
+  card LINGO powered up itself is powered back down.
 - WRITE shows a full plan (chip, blocks to be erased, Vpp) and asks before
   touching anything (`/Y` skips the prompt for scripted use).
 
 ## Usage
 
 ```
-FLINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
+LINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
 
   INFO [/PROBE]     socket + CIS facts; /PROBE adds live chip id (default)
   READ  file        dump card -> file (read-only)
@@ -55,12 +55,12 @@ FLINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
 Examples:
 
 ```
-FLINGO /PROBE                     what's in the socket?
-FLINGO READ CARD.IMG              dump the whole card (size from CIS)
-FLINGO READ CARD.IMG /LEN 2M      dump a blank-CIS card
-FLINGO WRITE IMAGE.BIN /Y         burn an image, verify, no questions
-FLINGO ERASE /ALL                 wipe the card
-FLINGO VERIFY IMAGE.BIN           is the card still the image?
+LINGO /PROBE                     what's in the socket?
+LINGO READ CARD.IMG              dump the whole card (size from CIS)
+LINGO READ CARD.IMG /LEN 2M      dump a blank-CIS card
+LINGO WRITE IMAGE.BIN /Y         burn an image, verify, no questions
+LINGO ERASE /ALL                 wipe the card
+LINGO VERIFY IMAGE.BIN           is the card still the image?
 ```
 
 READ/WRITE print a **CRC-32** of the data moved — handy for end-to-end
@@ -80,7 +80,7 @@ verification against the file on the other side of a serial link.
   a pair program in parallel).
 - **Word-only cards**: some cards (e.g. Intel Value Series 200) ignore `A0`
   and cannot do byte cycles at all — byte reads silently double every even
-  byte and byte writes corrupt. FLINGO detects this and switches everything
+  byte and byte writes corrupt. LINGO detects this and switches everything
   to word cycles; any byte-oriented tool would trash such a card.
 - **Slow cards**: window wait states are auto-tuned against stale-read
   behavior on tight back-to-back cycles (`/WS` overrides).
@@ -112,12 +112,14 @@ verification against the file on the other side of a serial link.
 Open Watcom 1.9, 16-bit real mode, small model — `BUILD.BAT`, or:
 
 ```
-wcc -ms -ox FLINGO.C -fo=FLINGO.obj
-wlink system dos name FLINGO.exe file FLINGO.obj
+wcc -ms -ox LINGO.C -fo=LINGO.obj
+wlink system dos name LINGO.exe file LINGO.obj
 ```
 
 ## The name
 
-**FL**ash + **LIN**ear + **GO**, and it speaks every card's *lingo* —
-Intel CUI, AMD unlock sequences, word-only, byte-only, slow, interleaved.
-Also, inescapably: 🦩
+**LIN**ear + **GO**, in the fleet's enabler tradition — and it speaks
+every card's *lingo*: Intel CUI, AMD unlock sequences, word-only,
+byte-only, slow, interleaved, FFS2, FAT12, and the OmniBook's own
+mirror-check dialect. (Briefly named FLINGO, until it was pointed out
+that's a dating app.)

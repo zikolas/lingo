@@ -1,6 +1,6 @@
 # OmniBook D-slot flash cards: the VS200, the PRETEC, and what the OmniBook actually wants
 
-*Bench notes, 2026-07-24 — the night FLINGO was born. HP OmniBook 300/425/430
+*Bench notes, 2026-07-24 — the night LINGO was born. HP OmniBook 300/425/430
 "D drive" card slot, tested against five PC Cards on an IBM PC110 (82365 PCIC)
 and a German-ROM OmniBook.*
 
@@ -46,13 +46,13 @@ attribute-space forgery required.
 ## Why the Intel Value Series 200 failed
 
 The VS200 (16 MB, "5V", eight E28F016S5 in four word-wide pairs) was our
-first clone target. The clone was byte-perfect — FLINGO verified all 12 MB —
+first clone target. The clone was byte-perfect — LINGO verified all 12 MB —
 and the OmniBook still refused to POST with it.
 
 The reason is wired into the card: **the VS200 has no byte-lane steering.
 It ignores A0 on byte cycles.** Byte reads return the even byte twice; byte
 writes all land on the low lane. It is a word-only card. Fine for hosts that
-do 16-bit accesses (FLINGO drives it entirely with word cycles), fatal for
+do 16-bit accesses (LINGO drives it entirely with word cycles), fatal for
 the OmniBook's byte-wise instruction fetches: the CPU asks for byte 5 and
 receives byte 4.
 
@@ -124,12 +124,12 @@ travel across the 425/430 family.
 
 A candidate card qualifies if and only if:
 
-1. **Byte-accessible** — the hard requirement. `FLINGO INFO` verdict line:
+1. **Byte-accessible** — the hard requirement. `LINGO INFO` verdict line:
    `window: 16-bit OK` = candidate; `WORD-ONLY card` = permanent reject.
 2. **≥ the image size** (12 MB for the standard system image).
 3. **Healthy** — clean chip IDs, no address-line faults. (A bridged-A1/A2
    card we triaged read plausibly at first glance and only failed under
-   FLINGO's per-lane write analysis.)
+   LINGO's per-lane write analysis.)
 4. Comparable **speed grade** (the HP card is 200 ns; slower cards are
    untested against the OmniBook's fixed timing — one to watch).
 
@@ -141,10 +141,10 @@ The same chips appear in both compliant and word-only cards.
 ## The procedure
 
 ```
-FLINGO /PROBE              qualify the candidate (width, chips, health)
-FLINGO READ  ORIG.IMG      dump the donor card (fully passive, WP on)
-FLINGO VERIFY ORIG.IMG     second read pass = trustworthy master
-FLINGO WRITE ORIG.IMG      one-block test first on unproven cards, then
+LINGO /PROBE              qualify the candidate (width, chips, health)
+LINGO READ  ORIG.IMG      dump the donor card (fully passive, WP on)
+LINGO VERIFY ORIG.IMG     second read pass = trustworthy master
+LINGO WRITE ORIG.IMG      one-block test first on unproven cards, then
                            erase + program + verify the full image
 ```
 
@@ -236,7 +236,7 @@ scan sequence outright.
 
 - **Build the first custom FAT12 D card** — every ingredient proven: HP
   CIS header + own FAT12 volume (mtools) + firmware blob at original
-  offsets, tiled to fill the card, written with FLINGO. The original
+  offsets, tiled to fill the card, written with LINGO. The original
   campaign goal, now recipe work.
 - **VS200 + English image tiled ×32**: prognosis upgraded to *good* — the
   FAT12 loader provably runs on word-only cards (its own ROM card is one),
@@ -247,12 +247,12 @@ scan sequence outright.
   unexplained refusal).
 - **FFS2 format analysis** of the German master image → custom application
   cards for the 1.1S generation too.
-- FLINGO v1.2: a `/TILE` option to write an image repeated to fill the
+- LINGO v1.2: a `/TILE` option to write an image repeated to fill the
   card, first-class `ATTR READ/WRITE` commands, the AMD word engine.
 - **FFS2 format analysis** of the master image → truly custom application
   cards, not just clones.
 - The spare region above the image on oversized cards → a read-only second
   drive with our own DOS driver.
 - Whether the OmniBook tolerates slower-than-200 ns cards.
-- An AMD word engine in FLINGO (AMD-chip cards currently write via the slow
+- An AMD word engine in LINGO (AMD-chip cards currently write via the slow
   byte path).

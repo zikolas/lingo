@@ -1,4 +1,4 @@
-/* FLINGO.C - PCMCIA linear flash / SRAM memory card reader-writer for DOS.
+/* LINGO.C - PCMCIA linear flash / SRAM memory card reader-writer for DOS.
  * Drives the card directly through an Intel 82365-class PCIC at 0x3E0 (no Card
  * Services needed). Reads any memory card raw; identifies flash chips via the
  * CIS, JEDEC autoselect and CFI; erases + programs Intel CUI flash (28F008SA
@@ -7,7 +7,7 @@
  * saved/restored, a card found powered is left exactly as found, and the
  * default READ / INFO paths never write a single byte to the card.
  *
- * Usage:  FLINGO [command] [file] [options]
+ * Usage:  LINGO [command] [file] [options]
  *   INFO             show socket + CIS + card facts (default command)
  *        /PROBE      also identify the chip live (JEDEC/CFI/SRAM probe -
  *                    writes ID commands to the card, restores SRAM bytes)
@@ -1422,8 +1422,8 @@ static unsigned long parsenum(const char *s)
 
 static void usage(void)
 {
-    printf("FLINGO - PCMCIA linear flash / SRAM card reader-writer (82365 PCIC @ 3E0)\n");
-    printf("Usage: FLINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]\n");
+    printf("LINGO - PCMCIA linear flash / SRAM card reader-writer (82365 PCIC @ 3E0)\n");
+    printf("Usage: LINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]\n");
     printf("  INFO [/PROBE]     card facts; /PROBE = live chip id (default cmd)\n");
     printf("  READ file         dump card to file (read-only, no probe)\n");
     printf("  WRITE file        erase + program + verify file onto card\n");
@@ -1493,7 +1493,7 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("FLINGO 1.1 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.1 - linear flash / SRAM card reader-writer\n");
 
     /* PCIC sanity: identification register reads 0x8x on 82365-compatibles */
     sockoff = 0;

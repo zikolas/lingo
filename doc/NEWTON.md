@@ -26,7 +26,7 @@ Toolkit: DEBUG scripts driving the 82365 PCIC directly (power → map a
 window with the REG bit → poke → tear down), with the safety drill:
 back up the CIS stream first (`CISDUMP /BIN`), test writability at a
 far-off harmless address, confirm REG# is respected (common memory
-untouched — verified by a full FLINGO VERIFY), only then touch real bytes.
+untouched — verified by a full LINGO VERIFY), only then touch real bytes.
 
 ## Three attempts on the OB430, all NO POST
 
@@ -84,7 +84,7 @@ The attribute space was blanked for attempt 5 and afterwards restored from
 the backup — with one lesson en route: the first restore pass ran against
 an **empty socket** (card was out for an OmniBook trip) and vanished into
 floating bus; all-`FF` readback was the tell. Always presence-check
-(`FLINGO /S 0`) before DEBUG attribute work. The second pass, card seated,
+(`LINGO /S 0`) before DEBUG attribute work. The second pass, card seated,
 restored and re-verified **byte-identical to the factory backup**
 (CRC-32 `15371FD0`, SHA-256 match, confirmed after a power cycle).
 Common memory currently holds the 8-tile English image — erase before any
@@ -96,7 +96,7 @@ The Newton's attribute space was restored from the pre-experiment backup
 and re-dumped for comparison: **CRC-32 and SHA-256 identical to the
 original** (`newtattr.bin` = `NEWTVER.BIN`, CRC-32 `15371FD0`).
 Factory state, cryptographically confirmed. Common memory still carries the
-OBROM image and a 4 K test block — run `FLINGO ERASE /ALL` (or let a Newton
+OBROM image and a 4 K test block — run `LINGO ERASE /ALL` (or let a Newton
 reformat it) before returning it to MessagePad duty.
 
 ## Worth keeping
@@ -107,5 +107,5 @@ reformat it) before returning it to MessagePad duty.
   identity experiments).
 - The **DEBUG attribute toolkit** (`ATTRA`–`ATTRR` scripts on the box)
   generalizes to any card in the PC110's socket.
-- FLINGO v1.2 wishlist: first-class `ATTR READ/WRITE` commands to replace
+- LINGO v1.2 wishlist: first-class `ATTR READ/WRITE` commands to replace
   the DEBUG dance.

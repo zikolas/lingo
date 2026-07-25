@@ -17,7 +17,7 @@ card **boots the OB430** — blank, unwritable attribute space and all.
 
 The dream from the original pitch is therefore real: **a D card that
 rewrites in ~15 seconds, wear-free.** Iterate custom images at interactive
-speed: edit on the Mac or box, `FLINGO WRITE`, walk it over. The only
+speed: edit on the Mac or box, `LINGO WRITE`, walk it over. The only
 caveats are the battery dependency (lab tool, not a keeper card) and the
 tiling requirement (any custom image must fill the card with repeats —
 trivial with `COPY /B` doubling).
@@ -103,7 +103,7 @@ the multi-minute flash erase/program cycle.
    past battery failure, but politeness is free).
 2. Build the probe image: first 2 MB of `HPCARD.IMG`, DEVICE tuple patched
    to declare 2 MB.
-3. `FLINGO WRITE` it to the SRAM card (no erase phase — SRAM writes
+3. `LINGO WRITE` it to the SRAM card (no erase phase — SRAM writes
    directly) and verify.
 4. Try the D slot:
    - **POST completes** → the firmware lives low; bisect toward a minimal
