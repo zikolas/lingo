@@ -163,6 +163,20 @@ verification across the serial link.
 | 2 MB SRAM card | Battery-backed, healthy; bit-rotted DOS ghost. Parked as the D-slot lab card (`SRAM-DSLOT.md`). |
 | OB430 English 2.0S ROM card | Word-only, FAT12, 400 K, HP card tools aboard (`OBCRDDRV`, `OBFDISK`, `FORMAT`, `LLREMOTE`). Boots its machine — see the Revision section. Dumped: `obrom.img`. |
 
+## Second revision: the acceptance mechanism resists identification
+
+Follow-up experiments (see `NEWTON.md` and `SRAM-DSLOT.md`) pushed further
+and failed further: a byte-accessible SRAM card carrying the complete
+bootable 512 K image was ignored (its attribute space is an unwritable
+void), and the Newton AMD card was refused through three escalations
+culminating in an attribute presentation **byte-identical to the OB430
+card's own** plus write-protect asserted. Conclusion: the OmniBook's card
+acceptance reads something beyond every attribute and common byte we can
+present — deeper attribute walks or physical probing remain the suspects.
+The empirical scoreboard: **HP originals and Intel-silicon flash clones
+(the PRETEC route) boot; everything else is silently refused.** The
+practical recipe is unchanged and remains fully proven.
+
 ## Open threads
 
 - **The FAT12 fast lane**: the 2.0S generation proves plain FAT12 D cards
@@ -171,6 +185,8 @@ verification across the serial link.
   `OBFDISK`/`FORMAT` from the English card are the factory tooling.
 - Test the flash-probe hypothesis: does the VS200 hang even with the
   English FAT12 image aboard?
+- Measure the Newton attribute EEPROM's extent and extend the HP spoof to
+  fill it (the last cheap acceptance experiment on the board).
 - **FFS2 format analysis** of the master image → truly custom application
   cards, not just clones.
 - The spare region above the image on oversized cards → a read-only second

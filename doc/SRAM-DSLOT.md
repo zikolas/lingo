@@ -1,6 +1,45 @@
-# Parked idea: SRAM card as a trimmed-down OmniBook D card
+# SRAM card as an OmniBook D card — tried, and why it failed
 
-*2026-07-24 — parked for a future bench session.*
+*2026-07-24 idea; executed 2026-07-25 with a better payload than planned.
+Result: negative, with a sharp diagnosis. Kept for the record.*
+
+## Outcome
+
+The experiment ran with a stronger payload than the trimmed-image plan
+below: the OB430's own **complete 512 K English system card image**
+(`OBROM.IMG` — FAT12 + firmware, proven bootable, no truncation guesswork,
+and its CIS even declares device type *SRAM*). Written to the 2 MB SRAM
+card and verified byte-exact. **The OB430 does not POST with it** — WP on
+or off — and a post-attempt verify showed the machine wrote nothing: it
+looked and silently declined, exactly as if the slot were empty.
+
+Diagnosis at the time: the SRAM card's **attribute space is a void**. Both
+HP cards present their CIS in attribute space (aliased from common memory);
+this card reads all-`FF` there, and a direct write test (PCIC window mapped
+to attribute space via DEBUG) proved there is **no attribute storage at
+all** — writes vanish, nothing to mirror into. The card is indistinguishable
+from an empty socket to any scan that starts with attribute space.
+
+**Revised in light of the Newton experiments (`NEWTON.md`)**: blank
+attribute space can no longer be called *the proven cause*. The Newton card
+was subsequently given a byte-identical copy of the OB430 card's attribute
+presentation — and was rejected too. So attribute visibility is evidently
+**necessary-looking but not sufficient**: the OmniBook's acceptance reads
+something beyond all attribute and common content we can present. For this
+SRAM card the blank attribute space remains a real and unfixable
+difference — it simply may not be the only thing that would have kept it
+out.
+
+Consequences (unchanged in practice):
+- The instant-rewrite D-slot laboratory needs, at minimum, a card whose
+  attribute space aliases common memory or is writable — this card has
+  neither — and per the Newton results possibly more than that. The
+  **PRETEC is the working lab card** (~5 min per rewrite cycle).
+- Corollary for card shopping: attribute-space behavior joins
+  byte-accessibility on the qualification list, with the caveat that the
+  full acceptance mechanism is still unmapped.
+
+The original idea and plan follow, for context.
 
 ## The idea
 

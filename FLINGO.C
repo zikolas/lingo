@@ -486,6 +486,7 @@ static int try_amd(int force)
         if (ok) {
             amd_a1 = va1[v]; amd_a2 = va2[v];
             nlanes = vln[v]; id_mfr = m[0]; id_dev = d[0];
+            org = (nlanes == 2) ? ORG_PAIR : ORG_X8;
             return 1;
         }
     }
@@ -1052,6 +1053,7 @@ static int confirm(void)
     int c;
     if (o_yes) return 1;
     printf("  proceed? (Y/N) ");
+    fflush(stdout);
     c = getch();
     printf("%c\n", c);
     return (c == 'y' || c == 'Y');
@@ -1201,7 +1203,7 @@ static int op_write(const char *fn)
     printf("  PLAN: WRITE %s (%lu bytes) -> card @ 0x%lX\n", fn, len, o_off);
     printf("        %s", type_name(ctype));
     if (ctype != T_SRAM) {
-        printf(" %s x%d", chip_name, nlanes);
+        printf(" %s %s", chip_name, orgname());
         if (!o_noerase) {
             unsigned long b0 = o_off / blk_bytes,
                           b1 = (o_off + len - 1) / blk_bytes;
