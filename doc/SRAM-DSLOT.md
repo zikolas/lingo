@@ -1,7 +1,29 @@
-# SRAM card as an OmniBook D card — tried, and why it failed
+# SRAM card as an OmniBook D card — dead, buried, and resurrected
 
-*2026-07-24 idea; executed 2026-07-25 with a better payload than planned.
-Result: negative, with a sharp diagnosis. Kept for the record.*
+*2026-07-24 idea; first execution 2026-07-25 failed; resurrected the same
+night by the mirror-check discovery. **The lab is operational.***
+
+## Resurrection: it boots
+
+The original failure below was misdiagnosed. The real cause was the
+**mirror check** (see `OMNIBOOK.md`, third revision): the FAT12-generation
+loader requires reads past the image's declared 512 K to wrap back to the
+image, as they do on the original ROM card. The first attempt carried a
+*single* copy — blank past 512 K — and failed the check. Attribute space
+had nothing to do with it.
+
+With the English image **tiled ×4** to fill the card (`T2.IMG`), the SRAM
+card **boots the OB430** — blank, unwritable attribute space and all.
+
+The dream from the original pitch is therefore real: **a D card that
+rewrites in ~15 seconds, wear-free.** Iterate custom images at interactive
+speed: edit on the Mac or box, `FLINGO WRITE`, walk it over. The only
+caveats are the battery dependency (lab tool, not a keeper card) and the
+tiling requirement (any custom image must fill the card with repeats —
+trivial with `COPY /B` doubling).
+
+The account below is preserved as a record of the misdiagnosis — a good
+example of a confident theory built on a confounded experiment.
 
 ## Outcome
 

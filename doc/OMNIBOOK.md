@@ -159,9 +159,13 @@ verification across the serial link.
 | Intel Value Series 200 16 MB | Healthy but word-only → D-slot ineligible. Data-card duty. |
 | Smart Modular 20 MB (SM9FA520) | A1/A2 address lines bridged (wired-AND) — hardware-dead. Scrapped. |
 | PRETEC Series-2 16 MB | **Boots the OmniBook.** The proven recipe. |
-| Apple Newton 4 MB (AMD 01/3D) | Healthy, blank, byte-accessible — too small for this job. |
-| 2 MB SRAM card | Battery-backed, healthy; bit-rotted DOS ghost. Parked as the D-slot lab card (`SRAM-DSLOT.md`). |
-| OB430 English 2.0S ROM card | Word-only, FAT12, 400 K, HP card tools aboard (`OBCRDDRV`, `OBFDISK`, `FORMAT`, `LLREMOTE`). Boots its machine — see the Revision section. Dumped: `obrom.img`. |
+| Apple Newton 4 MB (AMD 01/3D) | Healthy, byte-accessible, writable attr EEPROM — but refused by the D slot in every configuration (see `NEWTON.md`). Attr restored to factory; carries a tiled English image awaiting erase. |
+| 2 MB SRAM card | **Boots the OB430** with the English image tiled ×4 — the instant-rewrite D-slot lab card (`SRAM-DSLOT.md`). |
+| OB430 English 2.0S ROM card | Word-only, FAT12, 400 K, HP card tools aboard (`OBCRDDRV`, `OBFDISK`, `FORMAT`, `LLREMOTE`). Boots its machine. Dumped: `obrom.img`. |
+
+*(PRETEC's current cargo: the English image tiled ×32 — boots the OB430
+in English. The German clone is five minutes away via `HPCARD.IMG`
+whenever wanted.)*
 
 ## Second revision: the acceptance mechanism resists identification
 
@@ -170,23 +174,81 @@ and failed further: a byte-accessible SRAM card carrying the complete
 bootable 512 K image was ignored (its attribute space is an unwritable
 void), and the Newton AMD card was refused through three escalations
 culminating in an attribute presentation **byte-identical to the OB430
-card's own** plus write-protect asserted. Conclusion: the OmniBook's card
-acceptance reads something beyond every attribute and common byte we can
-present — deeper attribute walks or physical probing remain the suspects.
-The empirical scoreboard: **HP originals and Intel-silicon flash clones
-(the PRETEC route) boot; everything else is silently refused.** The
-practical recipe is unchanged and remains fully proven.
+card's own** plus write-protect asserted. At this point the suspects were
+deeper attribute walks or physical probing — until the third revision
+below found the real variable hiding in plain sight.
+
+## Third revision: the mirror check (the FAT12-generation answer)
+
+The breakthrough came from a control experiment that "should" have worked:
+the **PRETEC — the proven-bootable card — carrying the English 512 K image
+did not POST.** Same card that boots the German 12 MB FFS2 image; a single
+copy of the FAT12-generation image; refused. For the first time, evidence
+that **image content participates in acceptance**.
+
+The theory that fits: the original English card is 512 K of physical ROM
+whose reads past the end **wrap** — address 512 K reads as address 0. The
+FAT12-generation loader evidently *checks* for that behavior. A 16 MB card
+with one copy of the image reads blank past 512 K and fails the check.
+
+The fix is content, not hardware: **tile the image to fill the card.**
+32 copies across the PRETEC's 16 MB make every read at every offset return
+exactly what a wrapping 512 K ROM would return. (Build the tiled file
+on-box in seconds: `COPY /B` doubling — 512 K → 1 M → 2 M → 4 M → 8 M →
+16 M.)
+
+Results, in order:
+
+| Experiment | Result |
+|---|---|
+| PRETEC + English image, single copy | no POST |
+| PRETEC + English image **tiled ×32** | **boots** |
+| SRAM 2 MB + English image **tiled ×4** | **boots** — despite blank, unwritable attribute space |
+| Newton 4 MB + English image tiled ×8 | no POST |
+| Newton, tiled ×8, attribute space blanked to match the SRAM profile | no POST |
+
+The SRAM boot is the theory-killer for everything that came before: a card
+with **no attribute space at all** boots, so the attribute-based theories
+(v4–v6.1) were red herrings top to bottom. The single-copy refusals of the
+SRAM and Newton cards had been the mirror check all along.
+
+**The rules as now known:**
+
+- **FFS2 generation** (German-style): image written as-is; no mirror
+  check; card may be larger than the image. Byte-accessible flash proven.
+- **FAT12 generation** (English-style): image **tiled to fill the card**;
+  the loader runs happily on word-only cards (its own ROM card is one),
+  so this generation should even suit word-only flash — untested but
+  predicted (see open threads).
+- Attribute space: irrelevant. Write-protect: irrelevant.
+
+**What remains unexplained — the AMD wall**: the Newton card, with
+content, attribute space, byte-accessibility and WP state all equalized
+against the booting SRAM card, is still refused. The machine distinguishes
+AMD flash from SRAM below the level of any byte we can present. Leading
+candidate: the scan performs a write-and-readback (SRAM answers, flash
+ignores) and the write-ignoring path gates on something the Newton fails —
+READY/WAIT behavior, BVD wiring, sense pins. The definitive instrument is
+a **logic analyzer on the D-slot bus during POST**, which would show the
+scan sequence outright.
 
 ## Open threads
 
-- **The FAT12 fast lane**: the 2.0S generation proves plain FAT12 D cards
-  are valid — custom images become mtools territory (HP CIS header + boot
-  sector + files), no FFS2 archaeology required. HP's own `OBCRDDRV`/
-  `OBFDISK`/`FORMAT` from the English card are the factory tooling.
-- Test the flash-probe hypothesis: does the VS200 hang even with the
-  English FAT12 image aboard?
-- Measure the Newton attribute EEPROM's extent and extend the HP spoof to
-  fill it (the last cheap acceptance experiment on the board).
+- **Build the first custom FAT12 D card** — every ingredient proven: HP
+  CIS header + own FAT12 volume (mtools) + firmware blob at original
+  offsets, tiled to fill the card, written with FLINGO. The original
+  campaign goal, now recipe work.
+- **VS200 + English image tiled ×32**: prognosis upgraded to *good* — the
+  FAT12 loader provably runs on word-only cards (its own ROM card is one),
+  and the VS200's hang happened with the byte-reading FFS2 path. If it
+  boots, every card class in the drawer has a working recipe.
+- **The logic-analyzer expedition**: capture the D-slot bus during POST to
+  identify how the machine distinguishes AMD flash from SRAM (the last
+  unexplained refusal).
+- **FFS2 format analysis** of the German master image → custom application
+  cards for the 1.1S generation too.
+- FLINGO v1.2: a `/TILE` option to write an image repeated to fill the
+  card, first-class `ATTR READ/WRITE` commands, the AMD word engine.
 - **FFS2 format analysis** of the master image → truly custom application
   cards, not just clones.
 - The spare region above the image on oversized cards → a read-only second

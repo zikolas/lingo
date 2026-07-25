@@ -47,21 +47,48 @@ The OmniBook still declined, silently, exactly as if the slot were empty.
 
 ## What survives
 
-The acceptance mechanism reads something beyond attribute content, common
-content, WP state, and declared size. Ranked suspects:
+*(Written before the mirror-check discovery; superseded — see below.)*
+At this stage the suspects were deeper attribute walks and physical
+probing. The mirror check (`OMNIBOOK.md`, third revision) then explained
+the single-copy refusals — and prompted two more Newton attempts.
 
-1. **Deeper attribute reads than the spoof covers.** The spoof wrote 256
-   stream bytes; a real HP card aliases common memory into attribute space
-   *indefinitely*. If the firmware walks attribute space past the spoof's
-   edge it hits the divergence. Cheap future test: measure the Newton
-   EEPROM's full extent and extend the spoof to fill it — though a small
-   EEPROM can never impersonate megabytes of aliasing if the scan reads far.
-2. **Active/physical probing** — write-response behavior, mirror/sizing
-   checks, sense pins, timing. Not spoofable in software from this side.
+## Act two: the mirror check changes everything — except the verdict
 
-Empirically the standing scoreboard: **Intel-silicon flash cards (PRETEC
-route) and HP originals boot; everything else is refused** by a mechanism
-not yet identified. See `OMNIBOOK.md` for the full acceptance history.
+After the tiled English image booted from both the PRETEC and the SRAM
+card, the Newton got the same treatment, escalating to the final
+equalization:
+
+| # | Configuration | Result |
+|---|---|---|
+| 4 | English image **tiled ×8** (perfect mirror), factory attr, WP off | no POST |
+| 5 | tiled ×8 **plus attribute space blanked** — byte-for-byte the profile of the SRAM card that boots | **no POST** |
+
+Attempt 5 is the decisive one: every software-visible property — content,
+mirroring, attribute space, write-protect, byte-accessibility — now
+matched a booting card exactly. The OmniBook still refused. **The machine
+distinguishes this AMD flash card from SRAM at the physical layer.**
+Leading candidate: the scan writes a probe byte and reads it back (SRAM
+answers, flash silently ignores), and the write-ignoring path gates on
+something else the Newton fails — READY/WAIT behavior, BVD wiring, or
+sense pins. The instrument that settles it is a logic analyzer on the
+D-slot bus during POST.
+
+So the AMD verdict stands, now with full rigor: not the CIS, not the
+content, not the mirror — the silicon. The consolation prizes stand too:
+the writable attribute EEPROM, the toolkit, and a refusal so thoroughly
+characterized that the next investigator can start at the bus.
+
+## Restoration (second edition)
+
+The attribute space was blanked for attempt 5 and afterwards restored from
+the backup — with one lesson en route: the first restore pass ran against
+an **empty socket** (card was out for an OmniBook trip) and vanished into
+floating bus; all-`FF` readback was the tell. Always presence-check
+(`FLINGO /S 0`) before DEBUG attribute work. The second pass, card seated,
+restored and re-verified **byte-identical to the factory backup**
+(CRC-32 `15371FD0`, SHA-256 match, confirmed after a power cycle).
+Common memory currently holds the 8-tile English image — erase before any
+return to MessagePad duty.
 
 ## Restoration
 
