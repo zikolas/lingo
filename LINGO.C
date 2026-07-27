@@ -226,6 +226,84 @@ static void detect_w16(void)
     win1_datasize(0);
 }
 
+/* ---- post-power settle ---------------------------------------------------
+ * Attribute AND common memory lag socket power by a HOST-specific time (PC110
+ * ~30ms, ThinkPad 235 ~110ms measured), and the PCIC READY bit is no gate: on
+ * the 235 it asserts a full tick BEFORE the card reads true. See
+ * ~/Projects/pcmcia-cis-ff-bug.md.
+ *
+ * This matters more here than in a CIS reader. Everything downstream of this
+ * point reads the card to make a decision that is then acted on:
+ *   - detect_w16() compares byte and word views to choose the write engine;
+ *     an un-settled read misclassifies the card's organization.
+ *   - save_probe_bytes() snapshots the bytes the live probe is about to
+ *     clobber, and restore_probe_bytes() writes them BACK on an SRAM/ROM
+ *     card. Snapshot an un-settled window and the restore writes garbage
+ *     into the user's card.
+ *
+ * The gate a CIS reader uses - "byte 0 != FF" - is wrong for this tool: the
+ * cards LINGO exists for legitimately read all-FF (erased flash, a blank
+ * SRAM card, no CIS at all), so that clause would never pass and every such
+ * card would eat the full timeout. Instead:
+ *   - require STABILITY: the sampled bytes identical across two reads 20ms
+ *     apart. This is the clause that catches the PC110's post-power-cycle
+ *     garbage ramp, which is the mode that would corrupt a restore.
+ *   - sample attribute AND common memory, so a card with any content
+ *     anywhere gives a fast positive settle even when its CIS is blank.
+ *   - if everything reads FF, that is indistinguishable from an un-settled
+ *     window on this host family, so hold for a floor of SETTLE_FLOOR_MS
+ *     (~3x the worst settle measured) and then accept it as genuinely blank.
+ * A card with content exits in ~20-40ms; a blank one pays the floor; only a
+ * card that never holds still pays the full cap.                            */
+#define SETTLE_STEP_MS   20
+#define SETTLE_FLOOR_MS  300
+#define SETTLE_CAP_MS    5000
+static unsigned settle_ms;              /* how long the gate actually took   */
+static int      settle_allff;           /* accepted an all-FF (blank?) card  */
+static int      settle_unstable;        /* never held still - reads unsafe   */
+
+static void settle_snap(unsigned char *s)
+{
+    int k;
+    setwin(0, 0L, 1); dly(2000);                     /* attribute space  */
+    for (k = 0; k < 4; k++) s[k] = *wp8(0, k * 2);
+    setwin(0, 0L, 0); dly(2000);                     /* back to common   */
+    for (k = 0; k < 4; k++) s[4 + k] = *wp8(0, k);
+}
+
+static void settle_socket(void)
+{
+    unsigned char a[8], b[8];
+    unsigned t, k;
+    int allff;
+    settle_ms = 0; settle_allff = 0; settle_unstable = 0;
+    settle_snap(a);
+    for (t = SETTLE_STEP_MS; t <= SETTLE_CAP_MS; t += SETTLE_STEP_MS) {
+        dly(20000);                                  /* ~20ms */
+        settle_snap(b);
+        for (k = 0; k < 8 && a[k] == b[k]; k++) ;
+        if (k == 8) {                                /* held still */
+            for (allff = 1, k = 0; k < 8; k++) if (b[k] != 0xFF) { allff = 0; break; }
+            if (!allff) break;                       /* real data: settled */
+            if (t >= SETTLE_FLOOR_MS) { settle_allff = 1; break; }
+        }
+        for (k = 0; k < 8; k++) a[k] = b[k];
+        settle_unstable = (t >= SETTLE_CAP_MS);
+    }
+    settle_ms = t;
+    cur_pageB = 0xFFFFFFFFL;                         /* snap paged window 1 */
+}
+
+/* Wait for socket power-good (status bit 0x40). The 82365SL asserts it almost
+ * at once, but a CardBus-era bridge ramps Vcc through a soft power switch over
+ * hundreds of ms - reading a card before then is reading nothing.            */
+static int wait_power_good(void)
+{
+    int t;
+    for (t = 0; t < 50; t++) { dly(10000); if (rd(0x01) & 0x40) return 1; }
+    return 0;
+}
+
 static int open_socket(void)
 {
     int i, w0, w1;
@@ -234,7 +312,8 @@ static int open_socket(void)
     was_io = (sv03 & 0x20) != 0;
     we_powered = 0;
     if (!(rd(0x01) & 0x40) && !was_io) {
-        wr(0x02, 0x95); dly(30000);                  /* 5V power, we own it */
+        wr(0x02, 0x95);                              /* 5V power, we own it */
+        if (!wait_power_good()) { wr(0x02, 0x00); return 0; }
         wr(0x03, 0x40); dly(30000);                  /* mem mode, run       */
         we_powered = 1;
     }
@@ -246,19 +325,7 @@ static int open_socket(void)
     wr(0x06, sv06 | winbit[0] | winbit[1]);
     dly(20000);
     cur_pageB = 0xFFFFFFFFL;
-    /* Post-power settle: fixed delays are tuned to one host and the PCIC
-     * READY bit asserts before attribute memory is readable on some
-     * machines (measured: TP235 needs ~110ms, READY lies at ~55ms). Poll
-     * the data itself - a valid CIS never starts with 0xFF - and if it
-     * stays FF the elapsed poll window itself guarantees settling on any
-     * known host before we call the card blank. Instant on fast hosts and
-     * on sockets that were already powered.                              */
-    if (we_powered) {
-        int t;
-        setwin(0, 0L, 1); dly(5000);
-        for (t = 0; t < 200 && *wp8(0, 0) == 0xFF; t++) dly(5000);
-        setwin(0, 0L, 0); dly(1000);
-    }
+    if (we_powered) settle_socket();
     return 1;
 }
 
@@ -1136,6 +1203,9 @@ static void show_status(void)
         printf(", BVD1=%d BVD2=%d (battery low/dead if SRAM)",
                s & 1, (s >> 1) & 1);
     printf("\n");
+    if (we_powered && settle_ms > SETTLE_STEP_MS)
+        printf("  socket settled in %ums%s\n", settle_ms,
+               settle_allff ? " (reads all-FF - blank card, or a very slow host)" : "");
 }
 
 /* ---- operations ------------------------------------------------------------ */
@@ -1545,7 +1615,7 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LINGO 1.4 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.5 - linear flash / SRAM card reader-writer\n");
 
     /* PCIC sanity: identification register reads 0x8x on 82365-compatibles */
     sockoff = 0;
@@ -1576,6 +1646,17 @@ int main(int argc, char **argv)
     if (!found) { printf("! no card found\n"); return 1; }
     printf("=== Socket %d ===\n", (int)(sockoff / 0x40));
     show_status();
+    /* Never probe or write a card whose reads would not hold still: the live
+     * probe saves the bytes it clobbers and writes them back, so an unstable
+     * read turns that restore into corruption of the user's card.           */
+    if (settle_unstable) {
+        printf("  ! card memory never held still over %d s - reads are not\n"
+               "    trustworthy, so probing and writing are refused. Re-seat\n"
+               "    the card and retry (see pcmcia-cis-ff-bug.md).\n",
+               SETTLE_CAP_MS / 1000);
+        close_socket();
+        return 1;
+    }
     if (!wait_ready()) {
         printf("  ! card never came READY - aborting\n");
         close_socket();
