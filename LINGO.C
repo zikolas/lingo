@@ -99,6 +99,7 @@ static int cis_dtype = -1, cis_wps = -1, cis_speed = -1;
 static unsigned long cis_size = 0;
 static int cis_jmfr = -1, cis_jinfo = -1;
 static int cis_manf = -1, cis_prod = -1;
+static int cis_funcid = -1;   /* CISTPL_FUNCID: 1 = memory card           */
 
 /* ---- polite two-window socket access ------------------------------------ */
 /* Window 0 stays on card address 0 (common memory; flipped to attribute for
@@ -336,6 +337,7 @@ static void parse_cis(int show)
     int off = 0, guard = 0;
     cis_present = 0; cis_dtype = -1; cis_wps = -1; cis_speed = -1;
     cis_size = 0; cis_jmfr = -1; cis_jinfo = -1; cis_manf = -1; cis_prod = -1;
+    cis_funcid = -1;
     for (;;) {
         int code, link, i;
         unsigned char body[254];
@@ -359,6 +361,9 @@ static void parse_cis(int show)
                 cis_manf = body[1] << 8 | body[0];
                 cis_prod = body[3] << 8 | body[2];
             }
+            break;
+        case 0x21:                                   /* CISTPL_FUNCID       */
+            if (link >= 1) cis_funcid = body[0];
             break;
         case 0x15:                                   /* CISTPL_VERS_1       */
             if (show) {
@@ -686,6 +691,23 @@ static void probe_card(void)
     if ((ctype == T_SRAM || ctype == T_ROM || ctype == T_UNKNOWN) && !byte_broken)
         restore_probe_bytes();
     resolve_geom();
+}
+
+/* a card whose CIS declares a non-memory function (or a zero-size memory
+ * device) maps its function hardware where we expect storage - probing or
+ * writing it pokes unknown registers, so both are refused without /TYPE  */
+static int io_card(void)
+{
+    if (cis_funcid > 1) return 1;                    /* serial, disk, ...    */
+    if (cis_funcid < 0 && cis_dtype >= 0 && cis_size == 0) return 1;
+    return 0;
+}
+
+static const char *funcid_name(int f)
+{
+    static const char *n[9] = { "multi-function","memory","serial/modem",
+        "parallel","fixed disk","video","network","AIMS","SCSI" };
+    return (f >= 0 && f <= 8) ? n[f] : "?";
 }
 
 static const char *type_name(int t)
@@ -1129,6 +1151,15 @@ static int op_info(void)
                        : use16 ? "16-bit OK (fast ops)" : "8-bit");
     read_cis();
     parse_cis(1);
+    if (cis_funcid >= 0)
+        printf("    FUNCID: %02X (%s)\n", cis_funcid, funcid_name(cis_funcid));
+    if (io_card()) {
+        printf("    I/O-function card - not a memory card. WP/BVD lines are\n");
+        printf("    not meaningful here; probe and write are disabled\n");
+        printf("    (force with /TYPE only if you know what you're doing).\n");
+        if (o_probe && o_type) { probe_card(); show_probe(); }
+        return 0;
+    }
     if (o_probe) {
         probe_card();
         show_probe();
@@ -1183,6 +1214,11 @@ static int op_write(const char *fn)
     int r, use_buf;
 
     read_cis(); parse_cis(0);
+    if (io_card() && !o_type) {
+        printf("  ! CIS says this is an I/O-function card, not memory - refusing\n");
+        printf("    to write (override with /TYPE only if certain)\n");
+        return 1;
+    }
     if (rd(0x01) & 0x10) {
         printf("  ! write-protect switch is ON - flip it and retry\n");
         return 1;
@@ -1342,6 +1378,11 @@ static int op_erase(void)
     unsigned long len, b0, b1, b;
     int r;
     read_cis(); parse_cis(0);
+    if (io_card() && !o_type) {
+        printf("  ! CIS says this is an I/O-function card, not memory - refusing\n");
+        printf("    to erase (override with /TYPE only if certain)\n");
+        return 1;
+    }
     if (rd(0x01) & 0x10) {
         printf("  ! write-protect switch is ON - flip it and retry\n");
         return 1;
@@ -1506,7 +1547,7 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LINGO 1.2 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.3 - linear flash / SRAM card reader-writer\n");
 
     /* PCIC sanity: identification register reads 0x8x on 82365-compatibles */
     sockoff = 0;
