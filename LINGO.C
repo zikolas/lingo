@@ -1142,24 +1142,24 @@ static void show_status(void)
 
 static int op_info(void)
 {
-    show_status();
     if (!wait_ready()) { printf("  ! card never came READY\n"); return 1; }
+    read_cis();
+    parse_cis(0);                        /* classify before saying anything */
+    if (io_card()) {
+        if (cis_funcid >= 0)
+            printf("  not a linear flash or SRAM card (CIS: %s function)\n",
+                   funcid_name(cis_funcid));
+        else
+            printf("  not a linear flash or SRAM card (CIS declares no memory device)\n");
+        return 0;
+    }
+    show_status();
     detect_w16();
     tune_ws();
     printf("    window: %s\n",
            byte_broken ? "16-bit (WORD-ONLY card - ignores A0 on byte cycles)"
                        : use16 ? "16-bit OK (fast ops)" : "8-bit");
-    read_cis();
     parse_cis(1);
-    if (cis_funcid >= 0)
-        printf("    FUNCID: %02X (%s)\n", cis_funcid, funcid_name(cis_funcid));
-    if (io_card()) {
-        printf("    I/O-function card - not a memory card. WP/BVD lines are\n");
-        printf("    not meaningful here; probe and write are disabled\n");
-        printf("    (force with /TYPE only if you know what you're doing).\n");
-        if (o_probe && o_type) { probe_card(); show_probe(); }
-        return 0;
-    }
     if (o_probe) {
         probe_card();
         show_probe();
@@ -1215,8 +1215,7 @@ static int op_write(const char *fn)
 
     read_cis(); parse_cis(0);
     if (io_card() && !o_type) {
-        printf("  ! CIS says this is an I/O-function card, not memory - refusing\n");
-        printf("    to write (override with /TYPE only if certain)\n");
+        printf("  ! not a linear flash or SRAM card - refusing to write\n");
         return 1;
     }
     if (rd(0x01) & 0x10) {
@@ -1379,8 +1378,7 @@ static int op_erase(void)
     int r;
     read_cis(); parse_cis(0);
     if (io_card() && !o_type) {
-        printf("  ! CIS says this is an I/O-function card, not memory - refusing\n");
-        printf("    to erase (override with /TYPE only if certain)\n");
+        printf("  ! not a linear flash or SRAM card - refusing to erase\n");
         return 1;
     }
     if (rd(0x01) & 0x10) {
@@ -1547,7 +1545,7 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LINGO 1.3 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.4 - linear flash / SRAM card reader-writer\n");
 
     /* PCIC sanity: identification register reads 0x8x on 82365-compatibles */
     sockoff = 0;
