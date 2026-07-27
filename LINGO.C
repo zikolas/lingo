@@ -245,6 +245,19 @@ static int open_socket(void)
     wr(0x06, sv06 | winbit[0] | winbit[1]);
     dly(20000);
     cur_pageB = 0xFFFFFFFFL;
+    /* Post-power settle: fixed delays are tuned to one host and the PCIC
+     * READY bit asserts before attribute memory is readable on some
+     * machines (measured: TP235 needs ~110ms, READY lies at ~55ms). Poll
+     * the data itself - a valid CIS never starts with 0xFF - and if it
+     * stays FF the elapsed poll window itself guarantees settling on any
+     * known host before we call the card blank. Instant on fast hosts and
+     * on sockets that were already powered.                              */
+    if (we_powered) {
+        int t;
+        setwin(0, 0L, 1); dly(5000);
+        for (t = 0; t < 200 && *wp8(0, 0) == 0xFF; t++) dly(5000);
+        setwin(0, 0L, 0); dly(1000);
+    }
     return 1;
 }
 
@@ -1493,7 +1506,7 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LINGO 1.1 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.2 - linear flash / SRAM card reader-writer\n");
 
     /* PCIC sanity: identification register reads 0x8x on 82365-compatibles */
     sockoff = 0;
