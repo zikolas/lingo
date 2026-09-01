@@ -3,14 +3,14 @@
 A DOS tool that reads, writes, erases and identifies **linear memory
 PC Cards** — Intel-style linear flash cards (28F008SA family and friends),
 AMD 29F-series flash cards, and battery-backed SRAM cards — directly through
-an Intel **82365-class PCIC** at `3E0h`. One small `.EXE`, no Card Services,
+an Intel **82365-class PCIC**. One small `.EXE`, no Card Services,
 no Socket Services, no FTL driver.
 
 "Linear" cards are the memory-mapped kind (CIS `DEVICE` type `FLASH`/`SRAM`),
 not ATA flash: the card is a flat window of chip memory, and writing flash
 means real block erases and byte programming, which this tool does itself —
-including switching the socket's **Vpp to 12 V** for the older Intel chips
-that need it.
+including switching the socket's **Vpp** to whatever the chip wants, 12 V
+included for the older Intel parts.
 
 ## Polite by default
 
@@ -36,19 +36,21 @@ LINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
   WRITE file        erase + program + verify file -> card
   ERASE             erase /LEN bytes at /OFF, or /ALL
   VERIFY file       compare card against file
+  VPPTEST           report what the socket's Vpp switch accepts (writes nothing)
 
-  /S n              socket 0/1 (default: first with a card)
+  /S n              socket 0-7 (default: first with a card)
   /OFF /LEN         range; numbers take 0x-hex and K/M suffixes
   /SIZE n           card size override (blank-CIS cards)
   /BLK n            combined erase-block size override
   /TYPE t           force INTEL / AMD / SRAM
   /X1 /X2           force chip interleave (byte lanes)
-  /VPP 5|12         programming voltage override
+  /VPP 0|5|12       programming voltage override (0 = leave the rail alone)
   /W8               plain 8-bit window cycles only
   /W16              force word-only card handling (see below)
   /WS n             force n window wait states (0-3; default: auto-tuned)
   /NOBUF            no 0xE8 buffered writes
   /NOCRC            skip the CRC-32 on READ
+  /VDIAG            trace every Vpp change (reports PCIC reg 0x02)
   /NOERASE /NOVERIFY /ALL /SEG n /Y
 ```
 
@@ -97,8 +99,18 @@ verification against the file on the other side of a serial link.
 
 ## Caveats
 
-- Needs an 82365-compatible controller at `3E0h` (PC110, TP235, ToPIC in
-  ExCA mode, …). No Card Services backend yet.
+- Needs an 82365-compatible controller (PC110, TP235, ToPIC in ExCA mode, …).
+  No Card Services backend yet. LINGO scans all four index ports —
+  `3E0/3E2/3E4/3E6` — and checks each chip's identification register before
+  using it, so a machine whose first bridge is in CardBus mode is handled:
+  its sibling is found on a higher socket number. Socket `n` lives on the
+  chip at `3E0 + (n & ~1)`, bank `(n & 1)`, which is the same numbering the
+  enablers and CISDUMP use.
+- **Vpp is asserted only around a program or erase**, at the voltage that
+  chip needs, and dropped again afterwards. Reading, identifying and CIS
+  parsing all run with the programming rail off. If a program or erase comes
+  back `Vpp low`, the socket never supplied it — `VPPTEST` and `/VDIAG` show
+  what the hardware actually did.
 - Uses host memory `SEG:0000..SEG+7FF:000F` (32 K, default `D000`) for its
   two card windows — run from a clean boot or exclude the range from your
   memory manager (`/SEG` moves it).

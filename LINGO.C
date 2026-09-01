@@ -1,5 +1,5 @@
 /* LINGO.C - PCMCIA linear flash / SRAM memory card reader-writer for DOS.
- * Drives the card directly through an Intel 82365-class PCIC at 0x3E0 (no Card
+ * Drives the card directly through an Intel 82365-class PCIC (no Card
  * Services needed). Reads any memory card raw; identifies flash chips via the
  * CIS, JEDEC autoselect and CFI; erases + programs Intel CUI flash (28F008SA
  * family, 12V Vpp handled) and AMD 29F-series flash (5V), and writes SRAM
@@ -23,7 +23,7 @@
  *   /BLK n           erase-block size override (combined, bytes)
  *   /TYPE t          force INTEL / AMD / SRAM
  *   /X1 /X2          force 1 or 2 interleaved chips (byte lanes)
- *   /VPP n           programming voltage: 5 or 12 (default: per chip table)
+ *   /VPP n           programming voltage: 0, 5 or 12 (default: per chip table)
  *   /NOERASE         program without erasing first (pre-erased card)
  *   /NOVERIFY        skip the post-write verify pass
  *   /ALL             with ERASE: the whole card
@@ -39,7 +39,13 @@
 #include <conio.h>
 #include <dos.h>
 
-#define PCIC 0x3E0
+/* An 82365-class chip drives two sockets and answers at one of four index
+ * ports. Socket s lives on the chip at 0x3E0 + (s & ~1), bank (s & 1) * 0x40 -
+ * the same mapping the enablers and CISDUMP use, so /S numbers agree with
+ * theirs. Never assume a controller is there: a bridge left in CardBus mode
+ * does not answer at its index port, and the floating 0xFF reads back as a
+ * present, powered, I/O-configured socket. Check the ID register first. */
+#define PCIC_BASE 0x3E0
 
 /* card types */
 #define T_UNKNOWN 0
@@ -49,10 +55,13 @@
 #define T_ROM     4   /* reads stable, ignores writes */
 #define T_SERIES1 5   /* pre-CUI 28F010/28F020: detected, not programmable */
 
+static unsigned pcic = PCIC_BASE;
 static unsigned sockoff;
 
-static void wr(unsigned char i, unsigned char v){ outp(PCIC, i + sockoff); outp(PCIC + 1, v); }
-static unsigned char rd(unsigned char i){ outp(PCIC, i + sockoff); return (unsigned char)inp(PCIC + 1); }
+static void wr(unsigned char i, unsigned char v){ outp(pcic, i + sockoff); outp(pcic + 1, v); }
+static unsigned char rd(unsigned char i){ outp(pcic, i + sockoff); return (unsigned char)inp(pcic + 1); }
+static void sel_sock(unsigned s){ pcic = PCIC_BASE + (s & ~1); sockoff = (s & 1) * 0x40; }
+static int pcic_present(void){ return (rd(0x00) & 0xC0) == 0x80; }
 static void dly(unsigned n){ while (n--) inp(0x80); }              /* ~1us each */
 static unsigned long ticks(void){ return *(volatile unsigned long __far *)MK_FP(0x40, 0x6C); }
 
@@ -61,6 +70,7 @@ static int o_sock = -1;
 static unsigned o_seg = 0xD000;
 static unsigned long o_off = 0, o_len = 0, o_size = 0, o_blk = 0;
 static int o_type = 0, o_lanes = 0, o_vpp = -1;
+static int o_vdiag = 0;       /* /VDIAG: report reg 0x02 on every Vpp change */
 static int o_yes = 0, o_noerase = 0, o_noverify = 0, o_probe = 0, o_all = 0;
 static int o_w8 = 0;          /* /W8: force 8-bit window ops              */
 static int o_w16 = 0;         /* /W16: force word-only card handling      */
@@ -312,7 +322,7 @@ static int open_socket(void)
     was_io = (sv03 & 0x20) != 0;
     we_powered = 0;
     if (!(rd(0x01) & 0x40) && !was_io) {
-        wr(0x02, 0x95);                              /* 5V power, we own it */
+        wr(0x02, 0x90);                              /* Vcc on, Vpp OFF     */
         if (!wait_power_good()) { wr(0x02, 0x00); return 0; }
         wr(0x03, 0x40); dly(30000);                  /* mem mode, run       */
         we_powered = 1;
@@ -329,9 +339,54 @@ static int open_socket(void)
     return 1;
 }
 
+/* ---- Vpp -----------------------------------------------------------------
+ * PCIC reg 0x02 bits 3-2 = Vpp2, bits 1-0 = Vpp1: 00 off, 01 Vcc, 10 12V.
+ * The programming supply is asserted ONLY around a program or erase, and only
+ * at the voltage that chip wants. Reading, probing and the CIS all run with
+ * Vpp off - a tool that has not yet identified the card has no business
+ * putting a programming voltage on it. Equally, the 5V case is a real
+ * register write now, not an assumption that whoever powered the socket left
+ * Vpp at Vcc: on a socket already powered by Card Services it may well be off.
+ */
+static unsigned char vpp_sav; static int vpp_lvl = -1;   /* -1 = untouched */
+static void vpp_set(int volts)
+{
+    unsigned char f = (volts == 12) ? 0x0A : (volts == 5) ? 0x05 : 0x00;
+    if (vpp_lvl < 0) vpp_sav = rd(0x02);             /* first touch: host's */
+    if (vpp_lvl == volts) return;
+    wr(0x02, (unsigned char)((rd(0x02) & 0xF0) | f));
+    vpp_lvl = volts;
+    dly(volts ? 30000 : 10000);
+    if (o_vdiag) printf("  [vpp] asked %2dV, reg 0x02 = %02X\n", volts, rd(0x02));
+}
+static void vpp_restore(void)
+{
+    if (vpp_lvl < 0) return;
+    wr(0x02, vpp_sav);
+    vpp_lvl = -1; dly(10000);
+    if (o_vdiag) printf("  [vpp] restored, reg 0x02 = %02X\n", rd(0x02));
+}
+/* a status word with the Vpp-low bit set means the rail never arrived */
+static void vpp_gripe(long r)
+{
+    if (r <= 0 || !(r & 0x0808)) return;
+    printf("    Vpp did not reach the chip: asked for %dV, reg 0x02 = %02X.\n"
+           "    A 12V-only part needs /VPP 12. A socket with no Vpp switch\n"
+           "    cannot program at all. /VDIAG traces every Vpp change.\n",
+           vpp_lvl, rd(0x02));
+}
+/* voltage a program/erase on this card needs: nothing for SRAM */
+static int vpp_want(void)
+{
+    if (o_vpp >= 0) return o_vpp;                /* /VPP wins, 0 = none */
+    if (ctype == T_SRAM) return 0;
+    return need_vpp12 ? 12 : 5;
+}
+
 static void close_socket(void)
 {
     int i, j;
+    vpp_restore();                                   /* Vpp down first      */
     for (i = 0; i < 2; i++) for (j = 0; j < 6; j++) wr(winreg[i] + j, svwin[i][j]);
     wr(0x06, sv06);
     if (we_powered) { wr(0x03, sv03); wr(0x02, sv02); }
@@ -345,20 +400,6 @@ static int wait_ready(void)
         dly(50);
     }
     return 0;
-}
-
-/* Vpp 12V only while programming/erasing old Intel chips; restored after */
-static unsigned char vpp_sav; static int vpp_on = 0;
-static void vpp12(int on)
-{
-    if (on && !vpp_on) {
-        vpp_sav = rd(0x02);
-        wr(0x02, (vpp_sav & 0xF0) | 0x0A);           /* Vpp1=Vpp2=12V      */
-        vpp_on = 1; dly(30000);
-    } else if (!on && vpp_on) {
-        wr(0x02, vpp_sav);
-        vpp_on = 0; dly(10000);
-    }
 }
 
 /* ---- CIS ----------------------------------------------------------------- */
@@ -703,7 +744,7 @@ static void resolve_geom(void)
     if (o_size)              card_size = o_size;
     else if (cis_size)       card_size = cis_size;
     else if (chip_kb)        card_size = chip_kb * 1024UL * nlanes;
-    if (o_vpp >= 0) need_vpp12 = (o_vpp == 12);
+    if (o_vpp > 0) need_vpp12 = (o_vpp == 12);
 }
 
 static void probe_card(void)
@@ -819,18 +860,18 @@ static void show_probe(void)
 
 /* ---- flash primitives ----------------------------------------------------- */
 
-static int intel_prog(unsigned long addr, unsigned char val)
+static long intel_prog(unsigned long addr, unsigned char val)
 {
     volatile unsigned char __far *p = cmem(addr);
     unsigned n; unsigned char sr = 0;
     *p = 0x40; *p = val;
     for (n = 0; n < 60000U; n++) { sr = *p; if (sr & 0x80) break; }
     if (!(sr & 0x80)) return -1;                     /* timeout             */
-    if (sr & 0x18) return sr;                        /* prog fail / Vpp low */
+    if (sr & 0x18) return (long)sr;                  /* prog fail / Vpp low */
     return 0;
 }
 
-static int intel_erase_blk(unsigned long baddr)
+static long intel_erase_blk(unsigned long baddr)
 {
     int l;
     for (l = 0; l < nlanes; l++) {
@@ -864,18 +905,18 @@ static unsigned short countw(unsigned words)
                             : (unsigned short)((c << 8) | c);
 }
 
-static int intel_progw(unsigned long addr, unsigned val16)
+static long intel_progw(unsigned long addr, unsigned val16)
 {
     volatile unsigned short __far *p = cmem16(addr);
     unsigned n, sr = 0, rdy = srdy();
     *p = 0x4040; *p = val16;
     for (n = 0; n < 60000U; n++) { sr = *p; if ((sr & rdy) == rdy) break; }
     if ((sr & rdy) != rdy) return -1;
-    if (sr & seprog()) return (int)sr;               /* fail/Vpp             */
+    if (sr & seprog()) return (long)sr;              /* fail/Vpp             */
     return 0;
 }
 
-static int intel_erase_blkw(unsigned long baddr)
+static long intel_erase_blkw(unsigned long baddr)
 {
     volatile unsigned short __far *p = cmem16(baddr);
     unsigned long t0 = ticks();
@@ -887,13 +928,13 @@ static int intel_erase_blkw(unsigned long baddr)
         if (ticks() - t0 > 728UL) { *p = 0x5050; *p = 0xFFFF; return -1; }
     }
     *p = 0x5050; *p = 0xFFFF;
-    if (sr & serase()) return (int)sr;
+    if (sr & serase()) return (long)sr;
     return 0;
 }
 
 /* program one byte through the word engine: partner byte rides along as
  * 0xFF (programming 0xFF clears no bits, so it is untouched) */
-static int intel_progw_byte(unsigned long addr, unsigned char val)
+static long intel_progw_byte(unsigned long addr, unsigned char val)
 {
     unsigned w = (addr & 1) ? (((unsigned)val << 8) | 0x00FF)
                             : (0xFF00 | val);
@@ -911,7 +952,7 @@ static int wide_ok(void)                             /* word engine usable?  */
  * buffers load in parallel and program as ONE internal operation each -
  * an order of magnitude faster than per-byte programming on 5V silicon.
  * Returns -3 if the chip never offers a buffer (caller falls back).       */
-static int intel_bufw(unsigned long addr, unsigned short *src, unsigned cnt)
+static long intel_bufw(unsigned long addr, unsigned short *src, unsigned cnt)
 {
     volatile unsigned short __far *p = cmem16(addr);
     unsigned n, sr = 0, rdy = srdy();
@@ -926,7 +967,7 @@ static int intel_bufw(unsigned long addr, unsigned short *src, unsigned cnt)
     *p = 0xD0D0;
     for (n = 0; n < 60000U; n++) { sr = *p; if ((sr & rdy) == rdy) break; }
     if ((sr & rdy) != rdy) return -1;
-    if (sr & seprog()) return (int)sr;               /* prog/erase/Vpp bits  */
+    if (sr & seprog()) return (long)sr;              /* prog/erase/Vpp bits  */
     return 0;
 }
 
@@ -938,7 +979,7 @@ static void amd_cmd(int lane, unsigned char c)
     *wp8(0, (amd_a1 << sh) | lane) = c;
 }
 
-static int amd_prog(unsigned long addr, unsigned char val)
+static long amd_prog(unsigned long addr, unsigned char val)
 {
     volatile unsigned char __far *p;
     unsigned n; unsigned char r;
@@ -957,7 +998,7 @@ static int amd_prog(unsigned long addr, unsigned char val)
     return -1;
 }
 
-static int amd_erase_blk(unsigned long baddr)
+static long amd_erase_blk(unsigned long baddr)
 {
     int lane, sh = (nlanes == 2) ? 1 : 0;
     for (lane = 0; lane < nlanes; lane++) {
@@ -1019,7 +1060,7 @@ static void read_array_range(unsigned long start, unsigned long end)
     dly(100);
 }
 
-static int erase_block(unsigned long addr)
+static long erase_block(unsigned long addr)
 {
     if (ctype == T_INTEL) {
         if (wide_ok()) return intel_erase_blkw(addr);
@@ -1029,7 +1070,7 @@ static int erase_block(unsigned long addr)
     return 0;
 }
 
-static int prog_byte(unsigned long addr, unsigned char val)
+static long prog_byte(unsigned long addr, unsigned char val)
 {
     if (ctype == T_INTEL) return intel_prog(addr, val);
     if (ctype == T_AMD)   return amd_prog(addr, val);
@@ -1280,8 +1321,8 @@ static int op_write(const char *fn)
 {
     FILE *f;
     unsigned long flen, len, a, left, fb;
-    long bad;
-    int r, use_buf;
+    long bad, r;
+    int use_buf;
 
     read_cis(); parse_cis(0);
     if (io_card() && !o_type) {
@@ -1329,13 +1370,13 @@ static int op_write(const char *fn)
                    "\n        range inside those blocks is LOST)",
                    b0, b1, blk_bytes >> 10);
         }
-        if (ctype == T_INTEL) printf(", Vpp %s", need_vpp12 ? "12V" : "5V");
+        printf(", Vpp %dV", vpp_want());
         if (use_buf && wide_ok()) printf(", buffered x2");
     }
     printf("\n");
     if (!confirm()) { fclose(f); return 1; }
 
-    if (ctype == T_INTEL && need_vpp12) vpp12(1);
+    vpp_set(vpp_want());
 
     if (ctype != T_SRAM && !o_noerase) {
         unsigned long b0 = o_off / blk_bytes,
@@ -1345,10 +1386,10 @@ static int op_write(const char *fn)
             fflush(stdout);
             r = erase_block(b * blk_bytes);
             if (r) {
-                printf("\n  ! erase failed at block %lu (code %d%s)\n", b, r,
+                printf("\n  ! erase failed at block %lu (code %04lX%s)\n", b, r,
                        (ctype == T_INTEL && r > 0 && (r & 0x08)) ?
-                       " - Vpp low, try /VPP 12" : "");
-                vpp12(0); fclose(f); return 1;
+                       " - Vpp low" : "");
+                vpp_gripe(r); vpp_restore(); fclose(f); return 1;
             }
         }
         printf("\n");
@@ -1399,24 +1440,24 @@ static int op_write(const char *fn)
                 if (buf[i] != 0xFF) r = intel_progw_byte(a + i, buf[i]);
             }
             if (r) {
-                printf("\n  ! program failed at 0x%lX (code %d%s)\n",
+                printf("\n  ! program failed at 0x%lX (code %04lX%s)\n",
                        a + i, r,
                        (r > 0 && (r & 0x0808)) ?
-                       " - Vpp low, try /VPP 12" : "");
+                       " - Vpp low" : "");
                 read_array_range(o_off, a + i);
-                vpp12(0); fclose(f); return 1;
+                vpp_gripe(r); vpp_restore(); fclose(f); return 1;
             }
         } else {
             for (i = 0; i < got; i++) {
                 if (buf[i] == 0xFF) continue;        /* erased state anyway */
                 r = prog_byte(a + i, buf[i]);
                 if (r) {
-                    printf("\n  ! program failed at 0x%lX (code %d%s)\n",
+                    printf("\n  ! program failed at 0x%lX (code %04lX%s)\n",
                            a + i, r,
                            (ctype == T_INTEL && r > 0 && (r & 0x08)) ?
-                           " - Vpp low, try /VPP 12" : "");
+                           " - Vpp low" : "");
                     read_array_range(o_off, a + i);
-                    vpp12(0); fclose(f); return 1;
+                    vpp_gripe(r); vpp_restore(); fclose(f); return 1;
                 }
             }
         }
@@ -1426,7 +1467,7 @@ static int op_write(const char *fn)
     }
     printf("\n");
     read_array_range(o_off, o_off + len - 1);
-    vpp12(0);
+    vpp_restore();
     printf("  file CRC-32 %08lX\n", crc_done());
 
     if (!o_noverify) {
@@ -1445,7 +1486,7 @@ static int op_write(const char *fn)
 static int op_erase(void)
 {
     unsigned long len, b0, b1, b;
-    int r;
+    long r;
     read_cis(); parse_cis(0);
     if (io_card() && !o_type) {
         printf("  ! not a linear flash or SRAM card - refusing to erase\n");
@@ -1486,26 +1527,26 @@ static int op_erase(void)
     if (!blk_bytes) { printf("  ! erase-block size unknown - give /BLK\n"); return 1; }
     b0 = o_off / blk_bytes;
     b1 = (o_off + len - 1) / blk_bytes;
-    printf("  PLAN: ERASE blocks %lu-%lu (%luK each) = 0x%lX..0x%lX, %s x%d%s\n",
+    printf("  PLAN: ERASE blocks %lu-%lu (%luK each) = 0x%lX..0x%lX, %s x%d, Vpp %dV\n",
            b0, b1, blk_bytes >> 10, b0 * blk_bytes, (b1 + 1) * blk_bytes - 1,
-           chip_name, nlanes,
-           (ctype == T_INTEL && need_vpp12) ? ", Vpp 12V" : "");
+           chip_name, nlanes, vpp_want());
     if (!confirm()) return 1;
-    if (ctype == T_INTEL && need_vpp12) vpp12(1);
+    vpp_set(vpp_want());
     for (b = b0; b <= b1; b++) {
         printf("\r  erasing block %lu / %lu ", b - b0 + 1, b1 - b0 + 1);
         fflush(stdout);
         r = erase_block(b * blk_bytes);
         if (r) {
-            printf("\n  ! erase failed at block %lu (code %d%s)\n", b, r,
+            printf("\n  ! erase failed at block %lu (code %04lX%s)\n", b, r,
                    (ctype == T_INTEL && r > 0 && (r & 0x08)) ?
-                   " - Vpp low, try /VPP 12" : "");
-            vpp12(0); return 1;
+                   " - Vpp low" : "");
+            vpp_gripe(r); vpp_restore(); return 1;
         }
     }
+    printf("\n");
     read_array_mode();
-    vpp12(0);
-    printf("\n  done\n");
+    vpp_restore();
+    printf("  done\n");
     return 0;
 }
 
@@ -1544,7 +1585,7 @@ static unsigned long parsenum(const char *s)
 
 static void usage(void)
 {
-    printf("LINGO - PCMCIA linear flash / SRAM card reader-writer (82365 PCIC @ 3E0)\n");
+    printf("LINGO - PCMCIA linear flash / SRAM card reader-writer (82365 PCIC)\n");
     printf("Usage: LINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]\n");
     printf("  INFO [/PROBE]     card facts; /PROBE = live chip id (default cmd)\n");
     printf("  READ file         dump card to file (read-only, no probe)\n");
@@ -1552,10 +1593,48 @@ static void usage(void)
     printf("  ERASE             erase /LEN bytes at /OFF, or /ALL\n");
     printf("  VERIFY file       compare card to file\n");
     printf("Options: /S n socket, /OFF n, /LEN n, /SIZE n, /BLK n (nums: 0x.., K, M)\n");
-    printf("  /TYPE INTEL|AMD|SRAM, /X1 /X2 lanes, /VPP 5|12, /SEG n (def D000)\n");
+    printf("  /TYPE INTEL|AMD|SRAM, /X1 /X2 lanes, /VPP 0|5|12, /SEG n (def D000)\n");
+    printf("  VPPTEST  check what the socket's Vpp switch accepts (writes nothing)\n");
+    printf("  /VDIAG trace Vpp changes; /S n socket 0-7 (chip 3E0+(n&~1), bank n&1)\n");
     printf("  /NOERASE /NOVERIFY /ALL /Y (no confirm)\n");
     printf("  /W8 (no 16-bit cycles) /W16 (force word-only) /WS n /NOBUF /NOCRC\n");
     printf("Supports: Intel 28F008SA-family cards (12V Vpp), AMD 29F-style, SRAM.\n");
+}
+
+/* Nothing answered at any of the four index ports. On a machine whose
+ * bridges are set to CardBus this is the normal state, not a fault. */
+/* VPPTEST: drive the socket's Vpp field through off/Vcc/12V and report what
+ * reg 0x02 reads back. Issues no flash command and touches no card memory,
+ * so it is safe on any card - but a register that accepts the encoding is
+ * only half the answer: whether the board actually generates 12V can be
+ * settled only by a part that refuses to program without it. */
+static void op_vpptest(void)
+{
+    static int lv[3] = { 0, 5, 12 };
+    unsigned char got[3];
+    int i;
+    printf("  reg 0x02 as found: %02X\n", rd(0x02));
+    for (i = 0; i < 3; i++) {
+        vpp_set(lv[i]);
+        got[i] = rd(0x02);
+        printf("    Vpp %2dV -> 0x02 = %02X  (Vpp1 %d, Vpp2 %d)\n",
+               lv[i], got[i], got[i] & 3, (got[i] >> 2) & 3);
+    }
+    vpp_restore();
+    printf("  restored: %02X\n", rd(0x02));
+    if ((got[2] & 0x0F) != 0x0A)
+        printf("  ! this socket did not take the 12V encoding - a 12V-only\n"
+               "    part cannot be programmed here.\n");
+    else
+        printf("  the 12V encoding sticks. Whether the board really makes\n"
+               "  12V still needs a 12V part to program successfully.\n");
+}
+
+static void no_pcic(void)
+{
+    printf("! no 82365-class PCIC found (scanned 3E0/3E2/3E4/3E6)\n"
+           "  A bridge in CardBus mode does not answer here - its sibling\n"
+           "  may still be in PCIC mode on a higher socket number.\n");
 }
 
 #define C_INFO 0
@@ -1563,10 +1642,11 @@ static void usage(void)
 #define C_WRITE 2
 #define C_ERASE 3
 #define C_VERIFY 4
+#define C_VPPTEST 5
 
 int main(int argc, char **argv)
 {
-    int cmd = C_INFO, i, sock, found = 0, ret = 0;
+    int cmd = C_INFO, i, sock, found = 0, ret = 0, nfound = 0, usesock = 0;
     const char *fn = NULL;
 
     for (i = 1; i < argc; i++) {
@@ -1580,7 +1660,13 @@ int main(int argc, char **argv)
             else if (!stricmp(a, "SIZE")) { if (i+1 < argc) o_size = parsenum(argv[++i]); }
             else if (!stricmp(a, "BLK"))  { if (i+1 < argc) o_blk  = parsenum(argv[++i]); }
             else if (!stricmp(a, "SEG"))  { if (i+1 < argc) o_seg  = (unsigned)strtoul(argv[++i], NULL, 16); }
-            else if (!stricmp(a, "VPP"))  { if (i+1 < argc) o_vpp  = atoi(argv[++i]); }
+            else if (!stricmp(a, "VPP"))  {
+                if (i+1 < argc) o_vpp = atoi(argv[++i]);
+                if (o_vpp != 0 && o_vpp != 5 && o_vpp != 12) {
+                    printf("/VPP takes 0, 5 or 12\n"); return 1;
+                }
+            }
+            else if (!stricmp(a, "VDIAG")) o_vdiag = 1;
             else if (!stricmp(a, "TYPE")) {
                 if (i+1 < argc) {
                     char *t = argv[++i];
@@ -1608,6 +1694,7 @@ int main(int argc, char **argv)
         else if (!stricmp(a, "WRITE"))  cmd = C_WRITE;
         else if (!stricmp(a, "ERASE"))  cmd = C_ERASE;
         else if (!stricmp(a, "VERIFY")) cmd = C_VERIFY;
+        else if (!stricmp(a, "VPPTEST")) cmd = C_VPPTEST;
         else if (!fn) fn = a;
         else { printf("unexpected argument: %s\n", a); usage(); return 1; }
     }
@@ -1615,36 +1702,43 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LINGO 1.5 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.6 - linear flash / SRAM card reader-writer\n");
 
-    /* PCIC sanity: identification register reads 0x8x on 82365-compatibles */
-    sockoff = 0;
-    if ((rd(0x00) & 0xC0) != 0x80) {
-        printf("! no 82365-class PCIC found at 0x%X\n", PCIC);
-        return 1;
-    }
     crc_init();
 
     if (cmd == C_INFO) {
-        for (sock = 0; sock < 2; sock++) {
+        for (sock = 0; sock < 8; sock++) {
             if (o_sock >= 0 && sock != o_sock) continue;
-            sockoff = sock * 0x40;
-            printf("=== Socket %d ===\n", sock);
+            sel_sock((unsigned)sock);
+            if (!pcic_present()) {
+                if (o_sock >= 0)
+                    printf("=== Socket %d ===\n"
+                           "  no 82365-class controller at 0x%03X\n", sock, pcic);
+                continue;
+            }
+            nfound++;
+            printf("=== Socket %d (PCIC 0x%03X, bank 0x%02X, ID %02X) ===\n",
+                   sock, pcic, sockoff, rd(0x00));
             if (!open_socket()) { printf("  (no card present)\n"); continue; }
             op_info();
             close_socket();
         }
+        if (!nfound) no_pcic();
         return 0;
     }
 
     /* pick the socket for an operation */
-    for (sock = 0; sock < 2 && !found; sock++) {
+    for (sock = 0; sock < 8 && !found; sock++) {
         if (o_sock >= 0 && sock != o_sock) continue;
-        sockoff = sock * 0x40;
-        if (open_socket()) found = 1;
+        sel_sock((unsigned)sock);
+        if (!pcic_present()) continue;
+        nfound++;
+        if (open_socket()) { found = 1; usesock = sock; }
     }
+    if (!nfound) { no_pcic(); return 1; }
     if (!found) { printf("! no card found\n"); return 1; }
-    printf("=== Socket %d ===\n", (int)(sockoff / 0x40));
+    printf("=== Socket %d (PCIC 0x%03X, bank 0x%02X) ===\n",
+           usesock, pcic, sockoff);
     show_status();
     /* Never probe or write a card whose reads would not hold still: the live
      * probe saves the bytes it clobbers and writes them back, so an unstable
@@ -1678,6 +1772,7 @@ int main(int argc, char **argv)
     case C_WRITE:  ret = op_write(fn);  break;
     case C_ERASE:  ret = op_erase();    break;
     case C_VERIFY: ret = op_verify(fn); break;
+    case C_VPPTEST: op_vpptest(); ret = 0; break;
     }
     close_socket();
     return ret;

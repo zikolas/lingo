@@ -73,6 +73,24 @@ static void settle(void)
     }
 }
 
+/* Attribute-memory programming is what Vpp1 is for, so a write pass raises
+ * it to Vcc - but only a write pass. SAVE reads with the rail down: a tool
+ * has no business putting a programming voltage on a card it is reading. */
+static unsigned char vpp_sav; static int vpp_lvl = -1;
+static void vpp_set(int volts)
+{
+    unsigned char f = (volts == 12) ? 0x0A : (volts == 5) ? 0x05 : 0x00;
+    if (vpp_lvl < 0) vpp_sav = rd(0x02);
+    if (vpp_lvl == volts) return;
+    wr(0x02, (unsigned char)((rd(0x02) & 0xF0) | f));
+    vpp_lvl = volts; MS(20);
+}
+static void vpp_restore(void)
+{
+    if (vpp_lvl < 0) return;
+    wr(0x02, vpp_sav); vpp_lvl = -1; MS(10);
+}
+
 static int open_card(void)
 {
     unsigned start, stop, woff;
@@ -81,7 +99,7 @@ static int open_card(void)
     sv02 = rd(0x02); sv03 = rd(0x03); sv06 = rd(0x06);
     we_powered = 0;
     if (!(rd(0x01) & 0x40)) {
-        wr(0x02, 0x95);
+        wr(0x02, 0x90);                  /* Vcc on, Vpp off until needed */
         if (!wait_power_good()) { wr(0x02, 0x00); printf("! socket never came power-good\n"); return 0; }
         wr(0x03, 0x40); MS(20);
         we_powered = 1;
@@ -101,6 +119,7 @@ static int open_card(void)
 static void close_card(void)
 {
     int i;
+    vpp_restore();
     for (i = 0; i < 6; i++) wr(0x10 + i, svwin[i]);
     wr(0x06, sv06);
     if (we_powered) { wr(0x03, sv03); wr(0x02, sv02); }
@@ -144,6 +163,7 @@ int main(int argc, char **argv)
         printf("first 8: %02X %02X %02X %02X %02X %02X %02X %02X\n",
                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
     } else if (mode == 2) {
+        vpp_set(5);
         printf("about to write 0xFF over the first %u dense attribute bytes\n", blank);
         printf("(currently %02X %02X %02X %02X) - proceed? [y/N] ", p[0], p[2], p[4], p[6]);
         fflush(stdout);              /* prompt has no newline: force it out
@@ -162,6 +182,7 @@ int main(int argc, char **argv)
         if (!f) { printf("! cannot open %s\n", fn); close_card(); return 1; }
         len = (unsigned)fread(buf, 1, MAXLEN, f); fclose(f);
         printf("restoring %u dense bytes from %s...\n", len, fn);
+        vpp_set(5);
         for (i = 0; i < len; i++) {
             if (p[i * 2] != buf[i]) { p[i * 2] = buf[i]; MS(5); }
         }
