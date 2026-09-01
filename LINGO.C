@@ -375,7 +375,11 @@ static void vpp_gripe(long r)
            "    cannot program at all. /VDIAG traces every Vpp change.\n",
            vpp_lvl, rd(0x02));
 }
-/* voltage a program/erase on this card needs: nothing for SRAM */
+/* Voltage a program/erase on this card needs: nothing for SRAM. AMD 29F-series
+ * parts are single-supply and generate their programming voltage internally -
+ * an Am29F017 card was measured programming with Vpp at 0V - but 5V is asked
+ * for anyway, since it costs nothing on a part that ignores it and covers the
+ * older command-set-compatible parts that do want it. */
 static int vpp_want(void)
 {
     if (o_vpp >= 0) return o_vpp;                /* /VPP wins, 0 = none */
@@ -521,6 +525,7 @@ static struct devrec devtab[] = {
     { 0x04, 0xA4, "Fujitsu MBM29F040",  512, 64, T_AMD,     0 },
     { 0x01, 0xD5, "AMD Am29F080",      1024, 64, T_AMD,     0 },
     { 0x01, 0xAD, "AMD Am29F016",      2048, 64, T_AMD,     0 },
+    { 0x01, 0x3D, "AMD Am29F017",      2048, 64, T_AMD,     0 },
     { 0x20, 0xE2, "ST M29F040",         512, 64, T_AMD,     0 },
     { 0, 0, NULL, 0, 0, 0, 0 }
 };
@@ -1702,7 +1707,7 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LINGO 1.6 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.7 - linear flash / SRAM card reader-writer\n");
 
     crc_init();
 

@@ -86,7 +86,7 @@ verification against the file on the other side of a serial link.
   to word cycles; any byte-oriented tool would trash such a card.
 - **Slow cards**: window wait states are auto-tuned against stale-read
   behavior on tight back-to-back cycles (`/WS` overrides).
-- **AMD-style flash** (Am29F040/080/016, Fujitsu, ST, …): unlock-sequence
+- **AMD-style flash** (Am29F040/080/016/017, Fujitsu, ST, …): unlock-sequence
   command set, DQ7/DQ5 polling, both x8 and x16-in-byte-mode unlock address
   layouts, single or interleaved.
 - **SRAM** cards: plain writes, battery status (BVD) reported.
