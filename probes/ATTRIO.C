@@ -31,12 +31,18 @@
 #include <conio.h>
 #include <dos.h>
 
-#define PCIC 0x3E0
+/* Socket s lives on the chip at 0x3E0 + (s & ~1), bank (s & 1) * 0x40 - the
+ * numbering LINGO, CISDUMP and the enablers all use. A bridge left in CardBus
+ * mode does not answer at its index port and floats every read to 0xFF, which
+ * reads back as a present, powered socket, so check the ID register first. */
+#define PCIC_BASE 0x3E0
 #define MAXLEN 1024
 
-static unsigned sockoff = 0, memseg = 0xD000;
-static void wr(unsigned char i, unsigned char v){ outp(PCIC, i + sockoff); outp(PCIC + 1, v); }
-static unsigned char rd(unsigned char i){ outp(PCIC, i + sockoff); return (unsigned char)inp(PCIC + 1); }
+static unsigned pcic = PCIC_BASE, sockoff = 0, memseg = 0xD000;
+static void wr(unsigned char i, unsigned char v){ outp(pcic, i + sockoff); outp(pcic + 1, v); }
+static unsigned char rd(unsigned char i){ outp(pcic, i + sockoff); return (unsigned char)inp(pcic + 1); }
+static void sel_sock(unsigned s){ pcic = PCIC_BASE + (s & ~1); sockoff = (s & 1) * 0x40; }
+static int pcic_present(void){ return (rd(0x00) & 0xC0) == 0x80; }
 static void dly(unsigned n){ while (n--) inp(0x80); }
 #define MS(x) dly((unsigned)(x) * 1000U)
 
@@ -129,6 +135,7 @@ int main(int argc, char **argv)
 {
     unsigned len = 1024, blank = 4, i, bad = 0;
     int mode = 0;                                  /* 1 save 2 blank 3 load */
+    int socksel = -1; unsigned usesock = 0;
     char *fn = 0;
     unsigned char buf[MAXLEN];
     volatile unsigned char __far *p;
@@ -140,17 +147,36 @@ int main(int argc, char **argv)
         else if (!stricmp(a, "LOAD")  && i + 1 < (unsigned)argc) { mode = 3; fn = argv[++i]; }
         else if (!stricmp(a, "BLANK")) { mode = 2;
                   if (i + 1 < (unsigned)argc && argv[i+1][0] != '/') blank = (unsigned)atoi(argv[++i]); }
-        else if (!stricmp(a, "/S") && i + 1 < (unsigned)argc) sockoff = (unsigned)atoi(argv[++i]) * 0x40;
+        else if (!stricmp(a, "/S") && i + 1 < (unsigned)argc) socksel = atoi(argv[++i]);
         else if (!stricmp(a, "/W") && i + 1 < (unsigned)argc) memseg = (unsigned)strtol(argv[++i], 0, 16);
         else if (!stricmp(a, "/LEN") && i + 1 < (unsigned)argc) len = (unsigned)atoi(argv[++i]);
     }
     if (!mode || len > MAXLEN) {
         printf("ATTRIO - PC Card attribute memory read/blank/restore\n"
                "  ATTRIO SAVE file | BLANK [n] | LOAD file  [/S n] [/W hex] [/LEN n]\n"
+               "  /S n = socket 0-7 (chip 3E0+(n&~1), bank n&1); default: first with a card\n"
                "  ALWAYS SAVE before BLANK. Every write is verified by readback.\n");
         return 1;
     }
-    if ((rd(0x00) & 0xC0) != 0x80) { printf("! no 82365-class PCIC at 0x%X\n", PCIC); return 1; }
+    {   /* find the socket: the named one, else the first holding a card */
+        unsigned sk; int nfound = 0, got = 0;
+        for (sk = 0; sk < 8 && !got; sk++) {
+            if (socksel >= 0 && (int)sk != socksel) continue;
+            sel_sock(sk);
+            if (!pcic_present()) continue;
+            nfound++;
+            if ((rd(0x01) & 0x0C) == 0x0C) { got = 1; usesock = sk; }
+        }
+        if (!nfound) {
+            printf("! no 82365-class PCIC found (scanned 3E0/3E2/3E4/3E6)\n"
+                   "  A bridge in CardBus mode does not answer here - its sibling\n"
+                   "  may still be in PCIC mode on a higher socket number.\n");
+            return 1;
+        }
+        if (!got) { printf("! no card found\n"); return 1; }
+        sel_sock(usesock);
+        printf("socket %u (PCIC 0x%03X, bank 0x%02X)\n", usesock, pcic, sockoff);
+    }
     if (!open_card()) return 1;
     p = AW();
 

@@ -14,7 +14,7 @@ forgeable, and — the reason this exists — *blankable on purpose*.
 ATTRIO SAVE file      dump LEN dense bytes to file
 ATTRIO BLANK [n]      write 0xFF over the first n dense bytes (default 4)
 ATTRIO LOAD file      write file back, then verify
-  /S n socket   /W hex window segment   /LEN n bytes (default 1024)
+  /S n socket 0-7   /W hex window segment   /LEN n bytes (default 1024)
 ```
 
 Attribute memory implements only even host addresses, so dense byte `i` lives at
