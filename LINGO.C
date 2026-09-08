@@ -71,6 +71,7 @@ static unsigned o_seg = 0xD000;
 static unsigned long o_off = 0, o_len = 0, o_size = 0, o_blk = 0;
 static int o_type = 0, o_lanes = 0, o_vpp = -1;
 static int o_vdiag = 0;       /* /VDIAG: report reg 0x02 on every Vpp change */
+static int o_tile = 0;        /* /TILE: repeat the file to fill the card     */
 static int o_yes = 0, o_noerase = 0, o_noverify = 0, o_probe = 0, o_all = 0;
 static int o_w8 = 0;          /* /W8: force 8-bit window ops              */
 static int o_w16 = 0;         /* /W16: force word-only card handling      */
@@ -1217,6 +1218,26 @@ static int confirm(void)
 }
 
 /* verify card range against open file; returns mismatch count (-1 file err) */
+/* Read n bytes, wrapping back to the start of the file when tiling. A ROM
+ * with only its low address lines wired answers address X with image[X mod
+ * L], and an OmniBook FAT12-generation loader checks for exactly that. This
+ * reproduces it for ANY card size: whole copies, then a partial tail if the
+ * image does not divide the card - which is what the real ROM would give.
+ * Both the write loop and verify_range read through here, so a tiled card
+ * is verified against the same wrapped stream it was written from.        */
+static unsigned tread(FILE *f, unsigned char *p, unsigned n)
+{
+    unsigned got = fread(p, 1, n, f);
+    while (got < n && o_tile) {                  /* image < buffer: loop */
+        unsigned more;
+        rewind(f);
+        more = fread(p + got, 1, n - got, f);
+        if (!more) break;                        /* empty file, no spin  */
+        got += more;
+    }
+    return got;
+}
+
 static long verify_range(FILE *f, unsigned long off, unsigned long len,
                          unsigned long *first_bad)
 {
@@ -1226,7 +1247,7 @@ static long verify_range(FILE *f, unsigned long off, unsigned long len,
     unsigned long a = off, left = len, fb = 0xFFFFFFFFUL;
     while (left) {
         unsigned n = (left > (unsigned long)half) ? half : (unsigned)left;
-        unsigned got = fread(buf, 1, n, f), i;
+        unsigned got = tread(f, buf, n), i;
         if (got == 0) break;
         card_to_buf(a, cb, got);
         if (memcmp(buf, cb, got) != 0) {
@@ -1390,6 +1411,22 @@ static int op_write(const char *fn)
     fseek(f, 0L, SEEK_END); flen = (unsigned long)ftell(f); rewind(f);
     len = (o_len && o_len < flen) ? o_len : flen;
     if (!len) { printf("  ! %s is empty\n", fn); fclose(f); return 1; }
+    if (o_tile) {
+        if (o_len) {
+            printf("  ! /TILE repeats the whole file - /LEN cannot apply\n");
+            fclose(f); return 1;
+        }
+        if (!card_size) {
+            printf("  ! /TILE needs the card size - give /SIZE\n");
+            fclose(f); return 1;
+        }
+        if (flen >= card_size) {
+            printf("  ! %s already fills the card - nothing to repeat\n", fn);
+            fclose(f); return 1;
+        }
+        o_off = 0;                                   /* a mirror starts at 0 */
+        len = card_size;
+    }
     if (card_size && o_off + len > card_size) {
         printf("  ! %lu bytes @ 0x%lX won't fit a %luK card\n",
                len, o_off, card_size >> 10);
@@ -1400,7 +1437,11 @@ static int op_write(const char *fn)
         fclose(f); return 1;
     }
 
-    printf("  PLAN: WRITE %s (%lu bytes) -> card @ 0x%lX\n", fn, len, o_off);
+    printf("  PLAN: WRITE %s (%lu bytes) -> card @ 0x%lX\n",
+           fn, o_tile ? flen : len, o_off);
+    if (o_tile)
+        printf("        TILED x%lu to fill %luK - mirrors a %luK ROM\n",
+               (len + flen - 1) / flen, len >> 10, flen >> 10);
     printf("        %s", type_name(ctype));
     if (ctype != T_SRAM) {
         printf(", %s %s, Vpp %dV", chip_name, orgname(), vpp_want());
@@ -1440,7 +1481,7 @@ static int op_write(const char *fn)
     crc_start();
     while (left) {
         unsigned n = (left > sizeof(buf)) ? sizeof(buf) : (unsigned)left;
-        unsigned got = fread(buf, 1, n, f), i;
+        unsigned got = tread(f, buf, n), i;
         if (got == 0) break;
         crc_feed(buf, got);
         if (ctype == T_SRAM) {
@@ -1602,7 +1643,15 @@ static int op_verify(const char *fn)
     if (!f) { printf("  ! cannot open %s\n", fn); return 1; }
     fseek(f, 0L, SEEK_END); flen = (unsigned long)ftell(f); rewind(f);
     len = (o_len && o_len < flen) ? o_len : flen;
-    printf("  VERIFY %s (%lu bytes) vs card @ 0x%lX\n", fn, len, o_off);
+    if (o_tile) {
+        if (!card_size) {
+            printf("  ! /TILE needs the card size - give /SIZE\n");
+            fclose(f); return 1;
+        }
+        o_off = 0; len = card_size;
+    }
+    printf("  VERIFY %s (%lu bytes) vs card @ 0x%lX%s\n",
+           fn, o_tile ? flen : len, o_off, o_tile ? " - tiled" : "");
     bad = verify_range(f, o_off, len, &fb);
     fclose(f);
     if (bad) {
@@ -1639,6 +1688,7 @@ static void usage(void)
     printf("  /TYPE INTEL|AMD|SRAM, /X1 /X2 lanes, /VPP 0|5|12, /SEG n (def D000)\n");
     printf("  VPPTEST  check what the socket's Vpp switch accepts (writes nothing)\n");
     printf("  /VDIAG trace Vpp changes; /S n socket 0-7 (chip 3E0+(n&~1), bank n&1)\n");
+    printf("  /TILE  repeat the file to fill the card - mirrors a small ROM\n");
     printf("  /NOERASE /NOVERIFY /ALL /Y (no confirm)\n");
     printf("  /W8 (no 16-bit cycles) /W16 (force word-only) /WS n /NOBUF /NOCRC\n");
     printf("Supports: Intel 28F008SA-family cards (12V Vpp), AMD 29F-style, SRAM.\n");
@@ -1710,6 +1760,7 @@ int main(int argc, char **argv)
                 }
             }
             else if (!stricmp(a, "VDIAG")) o_vdiag = 1;
+            else if (!stricmp(a, "TILE")) o_tile = 1;
             else if (!stricmp(a, "TYPE")) {
                 if (i+1 < argc) {
                     char *t = argv[++i];
@@ -1745,7 +1796,7 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LINGO 1.8 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.9 - linear flash / SRAM card reader-writer\n");
 
     crc_init();
 

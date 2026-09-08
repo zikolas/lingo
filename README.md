@@ -53,6 +53,7 @@ LINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
   /NOBUF            no 0xE8 buffered writes
   /NOCRC            skip the CRC-32 on READ
   /VDIAG            trace every Vpp change (reports PCIC reg 0x02)
+  /TILE             repeat the file to fill the card (WRITE and VERIFY)
   /NOERASE /NOVERIFY /ALL /SEG n /Y
 ```
 
@@ -66,6 +67,16 @@ LINGO WRITE IMAGE.BIN /Y         burn an image, verify, no questions
 LINGO ERASE /ALL                 wipe the card
 LINGO VERIFY IMAGE.BIN           is the card still the image?
 ```
+
+`/TILE` writes the image over and over until the card is full, which is what
+a card has to look like when it stands in for a small ROM: a ROM with only
+its low address lines wired answers address *X* with `image[X mod L]`, and
+some loaders check for exactly that. It reproduces it for any card size —
+whole copies, then a partial tail if the image does not divide the card —
+so it is not limited to power-of-two ratios, and it needs no intermediate
+file. VERIFY takes `/TILE` too, reading the same wrapped stream, so a tiled
+card is checked against the image it was built from. Needs `/SIZE` when the
+card has no CIS to say how big it is.
 
 READ/WRITE print a **CRC-32** of the data moved — handy for end-to-end
 verification against the file on the other side of a serial link.
