@@ -31,7 +31,9 @@ In the CISDUMP tradition:
 ```
 LINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
 
-  INFO [/PROBE]     socket + CIS facts; /PROBE adds live chip id (default)
+  INFO [/PROBE]     socket + CIS facts (default command)
+  /PROBE            also ask the chip itself - WRITES ID commands to the
+                    card; INFO on its own never writes
   READ  file        dump card -> file (read-only)
   WRITE file        erase + program + verify file -> card
   ERASE             erase /LEN bytes at /OFF, or /ALL
@@ -111,9 +113,15 @@ verification against the file on the other side of a serial link.
   parsing all run with the programming rail off. If a program or erase comes
   back `Vpp low`, the socket never supplied it — `VPPTEST` and `/VDIAG` show
   what the hardware actually did.
-- Uses host memory `SEG:0000..SEG+7FF:000F` (32 K, default `D000`) for its
-  two card windows — run from a clean boot or exclude the range from your
-  memory manager (`/SEG` moves it).
+- Uses host memory `SEG:0000..SEG+7FF:000F` (**32 K**, default `D000`) for
+  its two card windows — run from a clean boot or exclude the range from
+  your memory manager (`/SEG` moves it). It needs the full 32 K: excluding
+  only 16 K is not enough.
+  **If the segment is not excluded, the window never reaches the card and
+  reads come back as zeroes** — host RAM reads `00`, where an erased card or
+  an empty socket reads `FF`. A dump like that still completes and still
+  prints a checksum, so LINGO now says plainly when a whole dump is one
+  repeated byte, and INFO warns when a present, READY card reads all-zero.
 - A freshly erased flash card has a blank CIS (all `FF`); give `/SIZE` (or
   `/LEN`) until an image with a CIS is written back.
 - Multi-bank cards identified only by chip ID (no CIS) report the size of

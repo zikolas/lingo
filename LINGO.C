@@ -270,6 +270,7 @@ static void detect_w16(void)
 #define SETTLE_CAP_MS    5000
 static unsigned settle_ms;              /* how long the gate actually took   */
 static int      settle_allff;           /* accepted an all-FF (blank?) card  */
+static int      settle_allzero;         /* window reads all-00 - see below   */
 static int      settle_unstable;        /* never held still - reads unsafe   */
 
 static void settle_snap(unsigned char *s)
@@ -286,7 +287,7 @@ static void settle_socket(void)
     unsigned char a[8], b[8];
     unsigned t, k;
     int allff;
-    settle_ms = 0; settle_allff = 0; settle_unstable = 0;
+    settle_ms = 0; settle_allff = 0; settle_unstable = 0; settle_allzero = 0;
     settle_snap(a);
     for (t = SETTLE_STEP_MS; t <= SETTLE_CAP_MS; t += SETTLE_STEP_MS) {
         dly(20000);                                  /* ~20ms */
@@ -301,6 +302,14 @@ static void settle_socket(void)
         settle_unstable = (t >= SETTLE_CAP_MS);
     }
     settle_ms = t;
+    /* An erased card reads all-FF and a floating bus reads all-FF, but host
+     * RAM reads all-00 - so an all-zero window on a card that is present and
+     * READY usually means the window segment is not reaching the card at all,
+     * typically because a memory manager has claimed it as UMB. The settle
+     * test alone cannot catch this: it asks for "not FF, and stable", and
+     * zeros satisfy both instantly. */
+    for (settle_allzero = 1, k = 0; k < 8; k++)
+        if (b[k] != 0x00) { settle_allzero = 0; break; }
     cur_pageB = 0xFFFFFFFFL;                         /* snap paged window 1 */
 }
 
@@ -1252,6 +1261,13 @@ static void show_status(void)
     if (we_powered && settle_ms > SETTLE_STEP_MS)
         printf("  socket settled in %ums%s\n", settle_ms,
                settle_allff ? " (reads all-FF - blank card, or a very slow host)" : "");
+    if (we_powered && settle_allzero)
+        printf("  ! this window reads ALL ZEROES on a card that is present and\n"
+               "    READY. That is not a blank card - a blank card reads FF. It\n"
+               "    usually means segment %04X is not reaching the card, because\n"
+               "    a memory manager has taken it as UMB. Exclude it (JEMM/EMM386\n"
+               "    X=%04X-%04X, 32K) or move LINGO with /SEG.\n",
+               o_seg, o_seg, o_seg + 0x7FF);
 }
 
 /* ---- operations ------------------------------------------------------------ */
@@ -1280,7 +1296,7 @@ static int op_info(void)
         probe_card();
         show_probe();
     } else {
-        printf("    (add /PROBE to identify the chip live)\n");
+        printf("    (add /PROBE to ask the chip itself - it writes ID commands)\n");
     }
     return 0;
 }
@@ -1289,6 +1305,7 @@ static int op_read(const char *fn)
 {
     FILE *f;
     unsigned long len, a, left;
+    int uniform = 1; unsigned char uval = 0;     /* whole dump one byte? */
     read_cis(); parse_cis(0);
     resolve_geom();                                  /* CIS size / /SIZE    */
     len = o_len ? o_len : (card_size > o_off ? card_size - o_off : 0);
@@ -1308,6 +1325,12 @@ static int op_read(const char *fn)
     while (left) {
         unsigned n = (left > sizeof(buf)) ? sizeof(buf) : (unsigned)left;
         card_to_buf(a, buf, n);
+        if (uniform) {                           /* free once it fails  */
+            unsigned k = 0;
+            if (a == o_off) uval = buf[0];
+            while (k < n && buf[k] == uval) k++;
+            if (k < n) uniform = 0;
+        }
         if (!o_nocrc) crc_feed(buf, n);
         if (fwrite(buf, 1, n, f) != n) {
             printf("\n  ! write error on %s (disk full?)\n", fn);
@@ -1319,6 +1342,19 @@ static int op_read(const char *fn)
     fclose(f);
     if (o_nocrc) printf("\n  done\n");
     else printf("\n  done, CRC-32 %08lX\n", crc_done());
+    /* A read that never reached the card still completes and still prints a
+     * checksum, so say plainly when the whole dump is one repeated byte.    */
+    if (uniform && len > 1024UL) {
+        printf("  ! every byte of this dump is %02X - it carries no data.\n", uval);
+        if (uval == 0x00)
+            printf("    All-zero means the window is almost certainly not reaching\n"
+                   "    the card: a memory manager holding %04X-%04X as UMB reads\n"
+                   "    back as zeroes. Exclude that 32K or move LINGO with /SEG.\n",
+                   o_seg, o_seg + 0x7FF);
+        else if (uval == 0xFF)
+            printf("    All-FF means an erased or absent card.\n");
+        printf("    Do NOT keep this file as a master.\n");
+    }
     return 0;
 }
 
@@ -1367,18 +1403,18 @@ static int op_write(const char *fn)
     printf("  PLAN: WRITE %s (%lu bytes) -> card @ 0x%lX\n", fn, len, o_off);
     printf("        %s", type_name(ctype));
     if (ctype != T_SRAM) {
-        printf(" %s %s", chip_name, orgname());
-        if (!o_noerase) {
-            unsigned long b0 = o_off / blk_bytes,
-                          b1 = (o_off + len - 1) / blk_bytes;
-            printf(", erase blocks %lu-%lu of %luK (data outside the file's"
-                   "\n        range inside those blocks is LOST)",
-                   b0, b1, blk_bytes >> 10);
-        }
-        printf(", Vpp %dV", vpp_want());
+        printf(", %s %s, Vpp %dV", chip_name, orgname(), vpp_want());
         if (use_buf && wide_ok()) printf(", buffered x2");
     }
     printf("\n");
+    /* the destructive part gets its own line, short enough not to wrap at
+     * 80 columns even with four-digit block numbers                       */
+    if (ctype != T_SRAM && !o_noerase) {
+        unsigned long b0 = o_off / blk_bytes,
+                      b1 = (o_off + len - 1) / blk_bytes;
+        printf("        ERASE blocks %lu-%lu of %luK first"
+               " - data will be WIPED!\n", b0, b1, blk_bytes >> 10);
+    }
     if (!confirm()) { fclose(f); return 1; }
 
     vpp_set(vpp_want());
@@ -1592,7 +1628,9 @@ static void usage(void)
 {
     printf("LINGO - PCMCIA linear flash / SRAM card reader-writer (82365 PCIC)\n");
     printf("Usage: LINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]\n");
-    printf("  INFO [/PROBE]     card facts; /PROBE = live chip id (default cmd)\n");
+    printf("  INFO [/PROBE]     card facts, from the CIS (default cmd)\n");
+    printf("       /PROBE       also ask the chip itself - this WRITES ID\n");
+    printf("                    commands to the card; INFO alone never writes\n");
     printf("  READ file         dump card to file (read-only, no probe)\n");
     printf("  WRITE file        erase + program + verify file onto card\n");
     printf("  ERASE             erase /LEN bytes at /OFF, or /ALL\n");
@@ -1707,7 +1745,7 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LINGO 1.7 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.8 - linear flash / SRAM card reader-writer\n");
 
     crc_init();
 
