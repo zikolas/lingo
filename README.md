@@ -12,6 +12,32 @@ means real block erases and byte programming, which this tool does itself —
 including switching the socket's **Vpp** to whatever the chip wants, 12 V
 included for the older Intel parts.
 
+## What it needs
+
+- **An 82365-class PCIC.** LINGO scans all four index ports —
+  `3E0/3E2/3E4/3E6` — and checks each chip's identification register before
+  using it, so a machine whose first bridge is in CardBus mode is handled:
+  its sibling is found on a higher socket number. Socket `n` is the chip at
+  `3E0 + (n & ~1)`, bank `(n & 1)` — the same numbering the enablers and
+  CISDUMP use. (PC110, TP235, ToPIC in ExCA mode, …) No Card Services
+  backend yet.
+- **32 K of free upper memory at `D000`-`D7FF`** — two 16 K host windows, at
+  `SEG` and `SEG+0x400`. It needs the *full* 32 K; excluding only 16 K is not
+  enough. `/SEG` moves it.
+  ⚠️ **If a memory manager holds that range as UMB, the window never reaches
+  the card and every read comes back as zeroes** — host RAM reads `00`, where
+  an erased card or an empty socket reads `FF`. The dump still completes and
+  still prints a confident checksum. Exclude the range (`X=D000-D7FF` for
+  JemmEx/EMM386), move it with `/SEG`, or run from a clean boot. LINGO warns
+  when a dump is one repeated byte, but on an irreplaceable card check the
+  CRC against a known master.
+- **Two of the PCIC's five memory windows.** LINGO borrows two, preferring
+  ones the controller has left disabled, and restores their registers exactly
+  afterwards. If fewer than two are free it reuses ones already in use —
+  still restored, but a resident driver holding a card mapped there will have
+  it moved under its feet, so prefer a clean boot when Card Services or an
+  enabler is loaded.
+
 ## Polite by default
 
 In the CISDUMP tradition:
@@ -60,7 +86,8 @@ LINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
 Examples:
 
 ```
-LINGO /PROBE                     what's in the socket?
+LINGO                            what's in the socket? (passive)
+LINGO /PROBE                     ...and ask the chip - WRITES ID commands
 LINGO READ CARD.IMG              dump the whole card (size from CIS)
 LINGO READ CARD.IMG /LEN 2M      dump a blank-CIS card
 LINGO WRITE IMAGE.BIN /Y         burn an image, verify, no questions
@@ -81,13 +108,72 @@ card has no CIS to say how big it is.
 READ/WRITE print a **CRC-32** of the data moved — handy for end-to-end
 verification against the file on the other side of a serial link.
 
+## Worked example: cloning an OmniBook 425 system card
+
+The HP OmniBook 300/425/430 will not POST without its system card in the
+"D drive" slot — it executes firmware from the card during boot. So the card
+is dumped in **another machine's** PCMCIA slot, not in the OmniBook.
+
+These cards have **no conventional attribute memory**: their CIS lives in
+*common* memory at offset 0, so `INFO` shows no CIS and cannot work out the
+size. Read the header first and take the size from the `DEVICE` tuple —
+byte 8, where `(byte >> 3) + 1` counts 512 K units on these cards:
+
+Before dumping anything irreplaceable, check `D000-D7FF` is free — see
+[What it needs](#what-it-needs). A window that never reaches the card gives
+you a full-size file of zeroes with a checksum under it.
+
+```
+LINGO READ HEAD.BIN /LEN 512 /SIZE 16M     grab the header
+```
+
+```
+13 03 43 49 53  01 03 52 BD FF  ...  "Hewlett-Packard Co." "1.1S ABD"
+^^^^^^^^^^^^^^  LINKTARGET "CIS"        ^^ BD>>3 = 23, +1 = 24 x 512K = 12 MB
+```
+
+The trailing string is the ROM code, which is the language: `ABA` US English,
+`ABB` British, `ABD` German. Observed sizes: `BD` = 12 MB (`1.1S ABD` German
+and `1.1S ABB` British), `9D` = 20 x 512 K = 10 MB (`1.1S ABA` US English).
+Then dump it, twice:
+
+```
+LINGO READ 425.IMG /SIZE 12M               dump (donor untouched, WP on)
+LINGO VERIFY 425.IMG /SIZE 12M             second pass = trustworthy master
+```
+
+Do **not** add `/PROBE` to a donor: reading is passive, identification is
+not, and you do not need the chip identity to dump a card.
+
+To write the clone, the target must be **byte-accessible** — `INFO` must say
+`window: 16-bit OK`, not `WORD-ONLY card`. A word-only card can hold the
+image perfectly and still hang the OmniBook's POST:
+
+```
+LINGO /PROBE                               qualify the target (writes ID cmds)
+LINGO WRITE 425.IMG                        erase + program + verify
+```
+
+A 16 MB card carrying a 12 MB image is fine; the spare space is ignored.
+
+The 430's own English card is a different generation — a 512 K FAT12 volume
+whose loader requires reads past the end to **wrap**, so a single copy on a
+larger card fails to boot. That one needs `/TILE`:
+
+```
+LINGO WRITE 430.IMG /TILE /SIZE 2M         fill a 2 MB flash or SRAM card
+```
+
+Full story, including which cards are eligible and why, in
+[doc/OMNIBOOK.md](doc/OMNIBOOK.md).
+
 ## What it knows
 
 - **Intel CUI flash** (28F008SA, Sharp LH28F008SA, 28F016 S-series, …):
-  block erase + program with status polling; Vpp 12 V switched on only
-  during program/erase and restored after (5 V-only parts stay at 5 V).
-  Where the chip's CFI advertises a write buffer, programming uses fast
-  buffered `0xE8` bursts.
+  block erase + program with status polling. Vpp is off except around a
+  program or erase, and is then asserted at the voltage the chip actually
+  wants — 12 V for the older parts, 5 V otherwise. Where the chip's CFI
+  advertises a write buffer, programming uses fast buffered `0xE8` bursts.
 - **Chip organization, detected live**: single x8 chips, two x8 chips
   interleaved on the byte lanes, and word-organized x16 parts each get the
   correct command addressing, status masks and erase-block geometry, driven
@@ -101,38 +187,27 @@ verification against the file on the other side of a serial link.
   behavior on tight back-to-back cycles (`/WS` overrides).
 - **AMD-style flash** (Am29F040/080/016/017, Fujitsu, ST, …): unlock-sequence
   command set, DQ7/DQ5 polling, both x8 and x16-in-byte-mode unlock address
-  layouts, single or interleaved.
+  layouts, single or interleaved. These parts are single-supply — an
+  Am29F017 card was measured programming and erasing with Vpp at 0 V — so a
+  socket with no Vpp switch at all can still write them, where a 12 V-only
+  Intel part cannot be written there.
 - **SRAM** cards: plain writes, battery status (BVD) reported.
 - **Identification**: CIS `DEVICE`/`JEDEC` tuples, JEDEC autoselect, CFI
   query, plus overrides for cards with a blank CIS. The same probes make a
-  handy card-triage instrument: address-line faults and dead cards show
-  distinctive fingerprints in seconds.
+  handy card-triage instrument — address-line faults and dead cards show
+  distinctive fingerprints in seconds — but they work by writing commands
+  to the card, so they stay opt-in behind `/PROBE` and never run during a
+  plain INFO or READ.
 - Intel **Series 1** (28F010/020, pre-CUI) cards are detected and readable
   but not programmable (they need the old erase-verify algorithm).
 
 ## Caveats
 
-- Needs an 82365-compatible controller (PC110, TP235, ToPIC in ExCA mode, …).
-  No Card Services backend yet. LINGO scans all four index ports —
-  `3E0/3E2/3E4/3E6` — and checks each chip's identification register before
-  using it, so a machine whose first bridge is in CardBus mode is handled:
-  its sibling is found on a higher socket number. Socket `n` lives on the
-  chip at `3E0 + (n & ~1)`, bank `(n & 1)`, which is the same numbering the
-  enablers and CISDUMP use.
 - **Vpp is asserted only around a program or erase**, at the voltage that
   chip needs, and dropped again afterwards. Reading, identifying and CIS
   parsing all run with the programming rail off. If a program or erase comes
   back `Vpp low`, the socket never supplied it — `VPPTEST` and `/VDIAG` show
   what the hardware actually did.
-- Uses host memory `SEG:0000..SEG+7FF:000F` (**32 K**, default `D000`) for
-  its two card windows — run from a clean boot or exclude the range from
-  your memory manager (`/SEG` moves it). It needs the full 32 K: excluding
-  only 16 K is not enough.
-  **If the segment is not excluded, the window never reaches the card and
-  reads come back as zeroes** — host RAM reads `00`, where an erased card or
-  an empty socket reads `FF`. A dump like that still completes and still
-  prints a checksum, so LINGO now says plainly when a whole dump is one
-  repeated byte, and INFO warns when a present, READY card reads all-zero.
 - A freshly erased flash card has a blank CIS (all `FF`); give `/SIZE` (or
   `/LEN`) until an image with a CIS is written back.
 - Multi-bank cards identified only by chip ID (no CIS) report the size of

@@ -773,7 +773,8 @@ static void probe_card(void)
     if (rd(0x01) & 0x10) {
         /* WP switch on: card ignores all writes, so a live (write-based)
          * probe can't work - fall back to what the CIS says */
-        printf("    (WP switch on - live probe skipped, using CIS only)\n");
+        printf("    (WP switch on: the probe works by writing ID commands,\n"
+               "     which a write-protected card ignores - using the CIS)\n");
         if      (cis_dtype == 6) ctype = T_SRAM;
         else if (cis_dtype == 5) ctype = T_UNKNOWN;  /* flash, chip unknown */
         else                     ctype = T_ROM;

@@ -140,22 +140,59 @@ The same chips appear in both compliant and word-only cards.
 
 ## The procedure
 
+The donor comes **out of the OmniBook** to be read — the machine will not
+POST without it, so there is no running system to dump it from.
+
+**Sizing comes first, and `INFO` cannot help.** An HP card has no attribute
+CIS, so LINGO shows no CIS and no size. Read the header and decode the
+`DEVICE` tuple in *common* memory at offset 0 — byte 8, `(byte >> 3) + 1`
+units of 512 K on these cards. Observed: `BD` = 24 x 512 K = 12 MB (German
+`1.1S ABD` German, `1.1S ABB` British), `9D` = 20 x 512 K = 10 MB (`1.1S ABA`
+US English). The trailing ROM code is the language: `ABA` US English, `ABB`
+British, `ABD` German.
+Guessing the size gives a truncated or padded file that still verifies
+against itself.
+
 ```
-LINGO /PROBE              qualify the candidate (width, chips, health)
-LINGO READ  ORIG.IMG      dump the donor card (fully passive, WP on)
-LINGO VERIFY ORIG.IMG     second read pass = trustworthy master
-LINGO WRITE ORIG.IMG      one-block test first on unproven cards, then
-                           erase + program + verify the full image
+LINGO READ  HEAD.BIN /LEN 512 /SIZE 16M   header first, for the size byte
+LINGO READ  ORIG.IMG /SIZE 12M            dump the donor (passive, WP on)
+LINGO VERIFY ORIG.IMG /SIZE 12M           second read pass = real master
+LINGO /PROBE                              qualify the TARGET (writes ID cmds)
+LINGO WRITE ORIG.IMG                      erase + program + verify
+```
+
+No `/PROBE` on the donor — reading is passive, identification writes ID
+commands, and the chip identity is not needed to dump a card.
+
+For a **FAT12-generation** image (the 430's 512 K English card) add `/TILE`,
+which mirrors it across the whole card in one pass — see the third revision
+below for why that is required:
+
+```
+LINGO WRITE 430.IMG /TILE /SIZE 2M        fill a 2 MB flash or SRAM card
+LINGO VERIFY 430.IMG /TILE /SIZE 2M       check the whole card against it
 ```
 
 Then into the D slot. Every transfer prints a CRC-32 for end-to-end
 verification across the serial link.
+
+⚠️ **Check the memory manager before dumping anything irreplaceable.** LINGO
+maps 32 K of upper memory for its card windows (default `D000`). If a memory
+manager holds that range as UMB, the window never reaches the card and the
+whole dump reads back as **zeroes** — and it completes normally, printing a
+confident CRC-32. This happened here: 12 MB of nothing, CRC `01FB2CCD`,
+which is exactly the CRC of that many zero bytes. Exclude the full 32 K
+(`X=D000-D7FF` — 16 K is not enough), move it with `/SEG`, or dump from a
+clean boot. LINGO 1.8 and later flag a dump that is one repeated byte, but
+the surest check is the CRC against a known master.
 
 ## Card census, night one
 
 | Card | Verdict |
 |---|---|
 | HP 12 MB German system card | Donor. Dumped passively, untouched, WP on. Image = system firmware + FFS2. |
+| HP 10 MB US English card (`1.1S ABA`) | Donor. Same structure, 10 MB — size byte `9D` where the German reads `BD`. |
+| HP 12 MB British card (`1.1S ABB`) | Donor. Dumped 2026-09-08; cloned to a PRETEC that boots. |
 | Intel Value Series 200 16 MB | Healthy but word-only → D-slot ineligible. Data-card duty. |
 | Smart Modular 20 MB (SM9FA520) | A1/A2 address lines bridged (wired-AND) — hardware-dead. Scrapped. |
 | PRETEC Series-2 16 MB | **Boots the OmniBook.** The proven recipe. |
@@ -163,9 +200,22 @@ verification across the serial link.
 | 2 MB SRAM card | **Boots the OB430** with the English image tiled ×4 — the instant-rewrite D-slot lab card (`SRAM-DSLOT.md`). |
 | OB430 English 2.0S ROM card | Word-only, FAT12, 400 K, HP card tools aboard (`OBCRDDRV`, `OBFDISK`, `FORMAT`, `LLREMOTE`). Boots its machine. Dumped: `obrom.img`. |
 
-*(PRETEC's current cargo: the English image tiled ×32 — boots the OB430
-in English. The German clone is five minutes away via `HPCARD.IMG`
-whenever wanted.)*
+### The masters
+
+Each was read twice and the second pass verified against the first, so the
+CRC-32 below is what a correct re-dump must produce. They are the reference
+for "did this dump actually work" — a read that never reaches the card still
+completes and still prints a checksum.
+
+| Image | Machine / ROM | Size | CRC-32 |
+|---|---|---|---|
+| `425-ABD.IMG` | 425 German `1.1S ABD` | 12 MB | `035C1680` |
+| `425-ABA.IMG` | 425 US English `1.1S ABA` | 10 MB | `9E447D28` |
+| `425-ABB.IMG` | 425 British `1.1S ABB` | 12 MB | `096B063B` |
+| `430.IMG` | 430 `2.0S`, FAT12 | 512 K | `77794F28` |
+
+The FFS2-generation images (12/10 MB) are written as-is. The 430's 512 K
+FAT12 image needs `/TILE`.
 
 ## Second revision: the acceptance mechanism resists identification
 
@@ -193,9 +243,16 @@ with one copy of the image reads blank past 512 K and fails the check.
 
 The fix is content, not hardware: **tile the image to fill the card.**
 32 copies across the PRETEC's 16 MB make every read at every offset return
-exactly what a wrapping 512 K ROM would return. (Build the tiled file
-on-box in seconds: `COPY /B` doubling — 512 K → 1 M → 2 M → 4 M → 8 M →
-16 M.)
+exactly what a wrapping 512 K ROM would return.
+
+**LINGO does this itself since 1.9: `/TILE`.** It streams the image straight
+from the source, so there is no scratch file the size of the card, and it is
+not limited to power-of-two ratios the way the old `COPY /B` doubling
+(512 K → 1 M → 2 M → 4 M → 8 M → 16 M) was — what is being emulated is
+`image[X mod L]`, so any card size works, whole copies then a partial tail.
+VERIFY takes `/TILE` too. Proven on the 2 MB SRAM card: the tiled stream came
+back CRC-32 `CA0C097D`, byte-identical to the `430-T2.IMG` built the old way,
+and the card boots.
 
 Results, in order:
 
@@ -247,10 +304,8 @@ scan sequence outright.
   unexplained refusal).
 - **FFS2 format analysis** of the German master image → custom application
   cards for the 1.1S generation too.
-- LINGO v1.2: a `/TILE` option to write an image repeated to fill the
-  card, first-class `ATTR READ/WRITE` commands, the AMD word engine.
-- **FFS2 format analysis** of the master image → truly custom application
-  cards, not just clones.
+- LINGO: first-class `ATTR READ/WRITE` commands (the `ATTRIO` probe covers
+  this for now), and the AMD word engine. *(`/TILE` shipped in 1.9.)*
 - The spare region above the image on oversized cards → a read-only second
   drive with our own DOS driver.
 - Whether the OmniBook tolerates slower-than-200 ns cards.
