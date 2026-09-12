@@ -180,9 +180,24 @@ Candidates, best first. All are candidates until probed.
   and 2500 flash cards are. Series 2+ is not one chip: `28F016SA` is 12 V
   Vpp, `28F016SV` is 5/12 V SmartVoltage. Confirm the ID and Vpp on the
   first one to arrive and correct LINGO's table.
-- Centennial `FL16M`/`FL20M`, Sharp-branded cards: Series 2 compatibles.
-- Smart Modular, Simple Technology, Kingston: made compatibles;
-  part-specific.
+- Centennial `FLxxM-20-11138-xx`: the `-11138` drawing number is sold as
+  "Series 2" in the 2 MB size and spans 2-20 MB, which is the 28F008SA
+  family's range; Centennial's AMD D-series cards carry `-11113` instead.
+  The 20 MB `FL20M-20-11138` clears every 425 image. Unverified.
+- Sharp-branded cards: Series 2 compatibles.
+- Smart Modular `SM9FLA` = Series 2 (cross-referenced to Centennial
+  `-11138`); `SM9FA5xx` = the Cisco 7500 RSP 20 MB cards, Series 2+ class
+  (the dead `SM9FA520` was a bad unit, not a bad family); `SM9FCSC` = the
+  Cisco 1600/1700 cards, 2-16 MB, Intel family, silicon unconfirmed.
+  `SM9AMD` is AMD, `SM9DRS` is DRAM — neither is a candidate.
+- Simple Technology, Kingston: made compatibles; part-specific.
+
+Pretec's own prefixes decode the chip directly: `F62` = Series II
+(28F008SA, the good one), `F63` = Series II+, `FN5` = Series 100 (28F016S5,
+the VS200 class), `F6C`/`F6D` = AMD C/D, `F61` = Series I. A `-08` or `-16`
+suffix means a single-width card; the discontinued dual cards carry no
+suffix. `FR2016` predates this scheme and is the proven card. `FJX016M6W`
+is not in Pretec's scheme and has no web presence — unplaceable, probe only.
 
 Avoid: Intel Value Series 100/200 and anything "Series 200 compatible" —
 Viking `VPK1216T5200`, Cisco `MEM-C6K-FLC24M` (word-only, tested);
