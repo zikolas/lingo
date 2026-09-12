@@ -95,6 +95,7 @@ is ever asserted.
 | 512 KB SRAM card | byte-accessible | Boots the 430 with a single copy: the ROM's own size, wraps in hardware, the closest stand-in there is. |
 | OB430 `2.0S` factory card | word-only | Boots its machine. 512 K ROM, wraps. |
 | Intel Value Series 200 16 MB — E28F016S5 (`89/14`), x16, 4 banks | word-only; reads OK on every path, no write lane isolation | Hangs POST with FFS2 images and with the tiled 430 image. Byte-path tools corrupt it. User-slot data card. |
+| Viking VPK1216T5200 24 MB — E28F016S5 (`89/14`), x16, 6 banks. Also sold as Cisco `MEM-C6K-FLC24M`, "Series 200 Compatible" | word-only | Same signature as the VS200. Tested by another OmniBook owner with the 425 ABA image: no POST. |
 | Apple Newton 4 MB — AMD Am29F017 pair | 16-bit OK | Refused in every configuration (`NEWTON.md`). |
 | Smart Modular 20 MB SM9FA520 | — | A1/A2 bridged. Dead. |
 
@@ -158,7 +159,9 @@ Two filters. A card needs both.
 
 1. Byte-steered. Intel's Series 2 card specification put the 8/16-bit
    steering on the card, and faithful Series 2 designs inherit it. The
-   Value Series dropped it: the VS200 is four unsteered word pairs. Pretec
+   Value Series dropped it: the VS200 is four unsteered word pairs. Read
+   labels carefully: "Series 2 compatible" is the good family, "Series 200
+   compatible" is the Value Series and fails. Pretec
    has since discontinued its dual cards and sells "8-bit only" or "16-bit
    only"; "16-bit only" is most plausibly word-only, "8-bit only" is
    untested in the D slot.
@@ -178,12 +181,13 @@ Candidates, best first. All are candidates until probed.
   Vpp, `28F016SV` is 5/12 V SmartVoltage. Confirm the ID and Vpp on the
   first one to arrive and correct LINGO's table.
 - Centennial `FL16M`/`FL20M`, Sharp-branded cards: Series 2 compatibles.
-- Viking, Smart Modular, Simple Technology, Kingston: made compatibles;
+- Smart Modular, Simple Technology, Kingston: made compatibles;
   part-specific.
 
-Avoid: Intel Value Series 100/200 (word-only); AMD-based cards — AMD
-`AmC0xxFLKA`, Fujitsu MBM29F, the Newton (the wall); StrataFlash
-(`28F128J3`, `28F640J3`, and most later Cisco cards).
+Avoid: Intel Value Series 100/200 and anything "Series 200 compatible" —
+Viking `VPK1216T5200`, Cisco `MEM-C6K-FLC24M` (word-only, tested);
+AMD-based cards — AMD `AmC0xxFLKA`, Fujitsu MBM29F, the Newton (the wall);
+StrataFlash (`28F128J3`, `28F640J3`).
 
 On arrival:
 
