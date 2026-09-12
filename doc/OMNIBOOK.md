@@ -1,313 +1,216 @@
-# OmniBook D-slot flash cards: the VS200, the PRETEC, and what the OmniBook actually wants
+# OmniBook D-slot cards: what the machine wants, and how to clone one
 
-*Bench notes, 2026-07-24 — the night LINGO was born. HP OmniBook 300/425/430
-"D drive" card slot, tested against five PC Cards on an IBM PC110 (82365 PCIC)
-and a German-ROM OmniBook.*
+*Bench notes for the HP OmniBook 300/425/430 "D drive" system card. Cards
+were read and written on an IBM PC110 and a ThinkPad 235 (82365-class PCIC)
+with LINGO, and tested in a German-ROM OmniBook 425 and an OmniBook 430.*
 
 ## The D slot is not a disk slot
 
-The fact that frames everything else: an OmniBook of this generation **does
-not POST without its system card in the D slot**. The card is not just an
-application disk — the machine executes system firmware from it, in place,
-during boot. A known trait of these machines, and the bench experiments
-bear it out:
+An OmniBook of this generation does not POST without its system card in
+the D slot. The machine executes firmware from the card, in place, during
+boot. An empty slot gives no POST; a card the CPU cannot read correctly
+hangs before video. The same card in a user slot is never touched at POST.
 
-| Experiment | Result |
-|---|---|
-| Original HP card in D slot | POSTs and boots |
-| Empty D slot | **No POST at all** |
-| Foreign card (VS200) in D slot | **No POST** (hangs) |
-| Same foreign card in a *user* PCMCIA slot | POSTs fine |
+## Inside the original card
 
-So the D slot is scanned — and fetched from — very early, byte by byte, and
-anything the CPU can't read correctly there stalls the machine before video.
-A card for this slot must behave *exactly* like memory.
+One HP card was opened. It is a mask-ROM card, not flash:
 
-## Anatomy of the original HP card
+- Five Sharp `LH537xxx` mask ROMs, date code week 19 of 1993, each with a
+  different sequential custom part number (`YLS43820A`…`60A`) — one mask
+  per chip. The board has six positions on the front and more unpopulated
+  footprints on the back; five populated is consistent with the 10 MB card,
+  six with the 12 MB.
+- One glob-top die on the reverse: the decoder. No other logic.
+- A spring contact at the rear edge for the write-protect slider.
+- No attribute EEPROM. The decoder does not decode `REG#`, so attribute
+  reads alias common memory (every other byte).
 
-The reference card (HP 12 MB German system card, Windows 3.1 era) taught us
-what "looking like an HP card" really means:
+What that means for the images:
 
-- **No attribute memory at all.** Attribute-space reads just alias common
-  memory (every other byte). Whatever the OmniBook checks, it isn't a
-  conventional attribute CIS.
-- **The CIS lives in common memory at offset 0**: `CISTPL_LINKTARGET`
-  (`13 03 "CIS"`), then a DEVICE tuple declaring `FLASH, 200 ns, 24 × 512 K
-  = 12 MB`, HP vendor tuples ("Hewlett-Packard Co.", "1.1S ABD"), and an
-  `FFS2` marker tuple.
-- **Filesystem: Microsoft Flash File System 2**, holding DOS, Windows, and
-  the German application set — plus whatever the BIOS itself needs.
-- Write-protect switch ON from the factory. Reads don't care.
+- The CIS lives in common memory at offset 0: `CISTPL_LINKTARGET`
+  (`13 03 "CIS"`), a DEVICE tuple, HP strings (`Hewlett-Packard Co.`,
+  `1.1S ABD`), an FFS2 marker.
+- The DEVICE tuple says `FLASH, 200 ns`. That is a driver convention — it
+  makes the Microsoft FFS2 driver mount the volume — not the silicon.
+- The 1.1S cards hold an FFS2 volume as a read-only snapshot. A custom 1.1S
+  image only has to be a valid read-only FFS2 volume.
+- The 425 ROM code is the language: `ABA` US English, `ABB` British, `ABD`
+  German.
 
-Everything identity-bearing is in common memory — which means everything
-identity-bearing is **clonable** with a raw 12 MB dump and write. No
-attribute-space forgery required.
+Everything identity-bearing is in common memory, so a raw dump and write
+clones the card.
 
-## Why the Intel Value Series 200 failed
+## What the OmniBook checks
 
-The VS200 (16 MB, "5V", eight E28F016S5 in four word-wide pairs) was our
-first clone target. The clone was byte-perfect — LINGO verified all 12 MB —
-and the OmniBook still refused to POST with it.
+Two image generations, two rules.
 
-The reason is wired into the card: **the VS200 has no byte-lane steering.
-It ignores A0 on byte cycles.** Byte reads return the even byte twice; byte
-writes all land on the low lane. It is a word-only card. Fine for hosts that
-do 16-bit accesses (LINGO drives it entirely with word cycles), fatal for
-the OmniBook's byte-wise instruction fetches: the CPU asks for byte 5 and
-receives byte 4.
+FFS2 generation (the 425's 10/12 MB cards, `1.1S`): written as-is; the card
+may be larger than the image; the card must be byte-accessible. The
+firmware fetches byte-wise, and a word-only card returns the even byte for
+every odd address — the CPU asks for byte 5 and receives byte 4. No image
+fixes that.
 
-Two corollaries worth remembering:
+FAT12 generation (the 430's 512 K card, `2.0S`): the original is 512 K of
+physical ROM whose reads past the end wrap, and the loader checks for that.
+A single copy on a larger card reads blank past 512 K and fails. The image
+must be tiled to fill the card (`LINGO /TILE`). This loader runs on the
+430's own word-only ROM card, but word-only flash still fails: the VS200
+carrying the tiled image does not POST. The VS200 and the 430 card fail
+8-bit-mode (`A0`) byte reads identically, and the VS200 reads correctly by
+the two paths a 16-bit host uses — word reads and odd bytes via `CE2#`
+alone — with no extra wait states. Since POST does not write, its missing
+write-lane isolation (`LINGO LANETEST`) is not the cause either. Whatever
+it trips on is on the D-slot bus and not reproduced by a PCIC.
 
-1. **No image can fix it.** The failure is electrical protocol, upstream of
-   content. Word-only cards are permanently ineligible for the D slot.
-2. **Byte-wise tools corrupt these cards.** Our first (byte-path) write
-   AND-ed every odd byte into its even neighbour's cell. Judging by the
-   pre-existing content, a previous owner's tool had done exactly the same
-   thing to it years ago.
+Images travel across the family: the 430 boots the 425's German FFS2 image
+from a PRETEC.
 
-The VS200 is not junk — it's now a verified, word-driven data card for user
-slots, where POST never touches it.
+What turned out not to matter, each disproved by a card that boots without
+it: the attribute CIS (the PRETEC advertises itself as a PRETEC), the
+write-protect state, the exact card size, and attribute space existing at
+all (the SRAM lab card has none). Several nights went into attribute-space
+theories before a control experiment showed the FAT12 refusals were the
+mirror check.
 
-## Why the PRETEC Series-2 worked
+POST does not write to the card. The original card is mask ROM, so nothing
+on the boot path can depend on a write succeeding; the 512 KB SRAM card,
+verified after booting the 430, is unchanged.
 
-The winning card: **PRETEC SERIES-2 16 MB** — sixteen Intel 28F008SA in
-byte-steered pairs, 200 ns, proper attribute CIS, 128 K combined erase
-blocks, 12 V Vpp for programming.
+What remains unexplained — the AMD wall: the Apple Newton card (AMD
+`01/3D`, byte-accessible, healthy) is refused with the same content,
+tiling, attribute presentation and WP state as the SRAM card that boots.
+The machine tells AMD flash from SRAM and Intel flash below any byte we
+can present. Intel-family silicon is the only proven class. The
+instrument for this is a logic analyzer on the card during POST; the
+opened board makes that easy — clip a ROM's `CE#`/`OE#` and the traces into
+the decoder rather than the 68-pin edge, and watch whether `WE#` or `REG#`
+is ever asserted.
 
-- Same silicon family HP built the original cards from, and crucially:
-  **full byte access**. The OmniBook cannot tell it from real memory,
-  because it *is* real memory in every access width.
-- 12 MB image cloned in ~5 minutes (word-parallel programming at 12 V —
-  which the PC110's socket turns out to supply), verified byte-for-byte.
-- In the D slot: **POST completes, German DOS boots.** Campaign won.
+## Card verdicts
 
-Two compatibility myths this bust:
+| Card | Access | Result |
+|---|---|---|
+| PRETEC Series-2 16 MB — 16 × Intel 28F008SA, byte-steered pairs, 200 ns, 12 V Vpp | 16-bit OK | Boots. FFS2 images as-is; 430 image tiled ×32. The proven recipe. |
+| 2 MB SRAM card | byte-accessible | Boots the 430 with the 430 image tiled ×4. Instant-rewrite lab card (`SRAM-DSLOT.md`). |
+| 512 KB SRAM card | byte-accessible | Boots the 430 with a single copy: the ROM's own size, wraps in hardware, the closest stand-in there is. |
+| OB430 `2.0S` factory card | word-only | Boots its machine. 512 K ROM, wraps. |
+| Intel Value Series 200 16 MB — E28F016S5 (`89/14`), x16, 4 banks | word-only; reads OK on every path, no write lane isolation | Hangs POST with FFS2 images and with the tiled 430 image. Byte-path tools corrupt it. User-slot data card. |
+| Apple Newton 4 MB — AMD Am29F017 pair | 16-bit OK | Refused in every configuration (`NEWTON.md`). |
+| Smart Modular 20 MB SM9FA520 | — | A1/A2 bridged. Dead. |
 
-- **The attribute CIS doesn't matter.** The PRETEC proudly announces
-  "PRETEC SERIES-2 16MB FLASH CARD" in attribute space. The OmniBook
-  doesn't care — evidence it reads the in-common-memory CIS (or none).
-- **Exact size doesn't matter.** A 16 MB card carrying a 12 MB image (whose
-  embedded CIS declares 12 MB) boots fine. The spare 4 MB sits ignored —
-  or available for our own second-drive experiments.
+## The masters
 
-## Revision: the word-only ROM card that boots anyway
+Each read twice, the second pass verified against the first. A correct
+re-dump must produce these; a read that never reaches the card completes
+and prints a checksum too.
 
-A later find forced a refinement. The **OB430's own English system card**
-(2.0S, a ~400 K **FAT12** DOS volume — `OMNIBOOKROM`, IO.SYS, HP's card
-tools — not FFS2 like the German 12 MB card from the OB425) turns out to be
-**word-only in our socket, and its OmniBook boots it happily**. Same D slot,
-three verdicts:
-
-| Card | Access | Content | OB430 |
-|---|---|---|---|
-| English 2.0S factory ROM card | word-only | FAT12, 400 K | boots |
-| PRETEC clone | byte-accessible | German FFS2 image | boots |
-| VS200 clone | word-only | German FFS2 image (byte-identical to the PRETEC's) | hangs POST |
-
-So byte-accessibility is **not** a slot-level absolute — the OmniBook can
-evidently read cards with word cycles and mux bytes internally. The
-hypothesis that fits all three results: when a card's fixed **attribute CIS
-announces flash** (as the VS200's does), the firmware takes a flash-aware
-path that issues **byte-wise flash commands** — scrambled on a word-only
-card, wedging POST. Factory ROM cards never trigger it; byte-accessible
-flash survives it. Untested prediction: the VS200 would hang even carrying
-the English FAT12 image.
-
-Practical consequence: unchanged. For *clone targets* (which are flash by
-nature), **byte-accessible remains the proven recipe** — the checklist
-below stands. But D-card *content* comes in at least two generations, and
-the FAT12 kind is far easier to build custom images for than FFS2. The
-430 also happily boots the 425's German image via the PRETEC, so images
-travel across the 425/430 family.
-
-## The D-slot compatibility checklist (for flash clone targets)
-
-A candidate card qualifies if and only if:
-
-1. **Byte-accessible** — the hard requirement. `LINGO INFO` verdict line:
-   `window: 16-bit OK` = candidate; `WORD-ONLY card` = permanent reject.
-2. **≥ the image size** (12 MB for the standard system image).
-3. **Healthy** — clean chip IDs, no address-line faults. (A bridged-A1/A2
-   card we triaged read plausibly at first glance and only failed under
-   LINGO's per-lane write analysis.)
-4. Comparable **speed grade** (the HP card is 200 ns; slower cards are
-   untested against the OmniBook's fixed timing — one to watch).
-
-Vpp voltage does **not** matter for the OmniBook (it only reads); it only
-determines which *writer* sockets can program the card. Chip vendor doesn't
-matter either — it's the card's lane wiring, not the silicon, that decides.
-The same chips appear in both compliant and word-only cards.
-
-## The procedure
-
-The donor comes **out of the OmniBook** to be read — the machine will not
-POST without it, so there is no running system to dump it from.
-
-**Sizing comes first, and `INFO` cannot help.** An HP card has no attribute
-CIS, so LINGO shows no CIS and no size. Read the header and decode the
-`DEVICE` tuple in *common* memory at offset 0 — byte 8, `(byte >> 3) + 1`
-units of 512 K on these cards. Observed: `BD` = 24 x 512 K = 12 MB (German
-`1.1S ABD` German, `1.1S ABB` British), `9D` = 20 x 512 K = 10 MB (`1.1S ABA`
-US English). The trailing ROM code is the language: `ABA` US English, `ABB`
-British, `ABD` German.
-Guessing the size gives a truncated or padded file that still verifies
-against itself.
-
-```
-LINGO READ  HEAD.BIN /LEN 512 /SIZE 16M   header first, for the size byte
-LINGO READ  ORIG.IMG /SIZE 12M            dump the donor (passive, WP on)
-LINGO VERIFY ORIG.IMG /SIZE 12M           second read pass = real master
-LINGO /PROBE                              qualify the TARGET (writes ID cmds)
-LINGO WRITE ORIG.IMG                      erase + program + verify
-```
-
-No `/PROBE` on the donor — reading is passive, identification writes ID
-commands, and the chip identity is not needed to dump a card.
-
-For a **FAT12-generation** image (the 430's 512 K English card) add `/TILE`,
-which mirrors it across the whole card in one pass — see the third revision
-below for why that is required:
-
-```
-LINGO WRITE 430.IMG /TILE /SIZE 2M        fill a 2 MB flash or SRAM card
-LINGO VERIFY 430.IMG /TILE /SIZE 2M       check the whole card against it
-```
-
-Then into the D slot. Every transfer prints a CRC-32 for end-to-end
-verification across the serial link.
-
-⚠️ **Check the memory manager before dumping anything irreplaceable.** LINGO
-maps 32 K of upper memory for its card windows (default `D000`). If a memory
-manager holds that range as UMB, the window never reaches the card and the
-whole dump reads back as **zeroes** — and it completes normally, printing a
-confident CRC-32. This happened here: 12 MB of nothing, CRC `01FB2CCD`,
-which is exactly the CRC of that many zero bytes. Exclude the full 32 K
-(`X=D000-D7FF` — 16 K is not enough), move it with `/SEG`, or dump from a
-clean boot. LINGO 1.8 and later flag a dump that is one repeated byte, but
-the surest check is the CRC against a known master.
-
-## Card census, night one
-
-| Card | Verdict |
-|---|---|
-| HP 12 MB German system card | Donor. Dumped passively, untouched, WP on. Image = system firmware + FFS2. |
-| HP 10 MB US English card (`1.1S ABA`) | Donor. Same structure, 10 MB — size byte `9D` where the German reads `BD`. |
-| HP 12 MB British card (`1.1S ABB`) | Donor. Dumped 2026-09-08; cloned to a PRETEC that boots. |
-| Intel Value Series 200 16 MB | Healthy but word-only → D-slot ineligible. Data-card duty. |
-| Smart Modular 20 MB (SM9FA520) | A1/A2 address lines bridged (wired-AND) — hardware-dead. Scrapped. |
-| PRETEC Series-2 16 MB | **Boots the OmniBook.** The proven recipe. |
-| Apple Newton 4 MB (AMD 01/3D) | Healthy, byte-accessible, writable attr EEPROM — but refused by the D slot in every configuration (see `NEWTON.md`). Attr restored to factory; carries a tiled English image awaiting erase. |
-| 2 MB SRAM card | **Boots the OB430** with the English image tiled ×4 — the instant-rewrite D-slot lab card (`SRAM-DSLOT.md`). |
-| OB430 English 2.0S ROM card | Word-only, FAT12, 400 K, HP card tools aboard (`OBCRDDRV`, `OBFDISK`, `FORMAT`, `LLREMOTE`). Boots its machine. Dumped: `obrom.img`. |
-
-### The masters
-
-Each was read twice and the second pass verified against the first, so the
-CRC-32 below is what a correct re-dump must produce. They are the reference
-for "did this dump actually work" — a read that never reaches the card still
-completes and still prints a checksum.
-
-| Image | Machine / ROM | Size | CRC-32 |
+| Image | ROM | Size | CRC-32 |
 |---|---|---|---|
 | `425-ABD.IMG` | 425 German `1.1S ABD` | 12 MB | `035C1680` |
 | `425-ABA.IMG` | 425 US English `1.1S ABA` | 10 MB | `9E447D28` |
 | `425-ABB.IMG` | 425 British `1.1S ABB` | 12 MB | `096B063B` |
 | `430.IMG` | 430 `2.0S`, FAT12 | 512 K | `77794F28` |
 
-The FFS2-generation images (12/10 MB) are written as-is. The 430's 512 K
-FAT12 image needs `/TILE`.
+## Cloning a card
 
-## Second revision: the acceptance mechanism resists identification
+The donor comes out of the OmniBook; there is no running system to dump
+it from.
 
-Follow-up experiments (see `NEWTON.md` and `SRAM-DSLOT.md`) pushed further
-and failed further: a byte-accessible SRAM card carrying the complete
-bootable 512 K image was ignored (its attribute space is an unwritable
-void), and the Newton AMD card was refused through three escalations
-culminating in an attribute presentation **byte-identical to the OB430
-card's own** plus write-protect asserted. At this point the suspects were
-deeper attribute walks or physical probing — until the third revision
-below found the real variable hiding in plain sight.
+Size first. `INFO` shows no CIS on an HP card. Read the header and decode
+byte 8 of the DEVICE tuple: `(byte >> 3) + 1` units of 512 K. `BD` = 12 MB
+(ABD, ABB); `9D` = 10 MB (ABA). A guessed size gives a truncated or padded
+file that verifies against itself.
 
-## Third revision: the mirror check (the FAT12-generation answer)
+```
+LINGO READ  HEAD.BIN /LEN 512 /SIZE 16M   header, for the size byte
+LINGO READ  ORIG.IMG /SIZE 12M            dump the donor (passive, WP on)
+LINGO VERIFY ORIG.IMG /SIZE 12M           second pass = master
+LINGO /PROBE                              qualify the TARGET (writes ID cmds)
+LINGO WRITE ORIG.IMG                      erase + program + verify
+```
 
-The breakthrough came from a control experiment that "should" have worked:
-the **PRETEC — the proven-bootable card — carrying the English 512 K image
-did not POST.** Same card that boots the German 12 MB FFS2 image; a single
-copy of the FAT12-generation image; refused. For the first time, evidence
-that **image content participates in acceptance**.
+No `/PROBE` on the donor: reading is passive, the probe writes ID
+commands, and the chip identity is not needed to dump. (A mask-ROM donor
+ignores writes anyway; keep the habit.)
 
-The theory that fits: the original English card is 512 K of physical ROM
-whose reads past the end **wrap** — address 512 K reads as address 0. The
-FAT12-generation loader evidently *checks* for that behavior. A 16 MB card
-with one copy of the image reads blank past 512 K and fails the check.
+The target must report `window: 16-bit OK` and Intel-family silicon
+(`89/A2` or Sharp `B0/A2`). A word-only card holds the image perfectly and
+still hangs POST.
 
-The fix is content, not hardware: **tile the image to fill the card.**
-32 copies across the PRETEC's 16 MB make every read at every offset return
-exactly what a wrapping 512 K ROM would return.
+For the 430 image, tile it:
 
-**LINGO does this itself since 1.9: `/TILE`.** It streams the image straight
-from the source, so there is no scratch file the size of the card, and it is
-not limited to power-of-two ratios the way the old `COPY /B` doubling
-(512 K → 1 M → 2 M → 4 M → 8 M → 16 M) was — what is being emulated is
-`image[X mod L]`, so any card size works, whole copies then a partial tail.
-VERIFY takes `/TILE` too. Proven on the 2 MB SRAM card: the tiled stream came
-back CRC-32 `CA0C097D`, byte-identical to the `430-T2.IMG` built the old way,
-and the card boots.
+```
+LINGO WRITE 430.IMG /TILE /SIZE 2M        fill a 2 MB flash or SRAM card
+LINGO VERIFY 430.IMG /TILE /SIZE 2M       check the whole card against it
+```
 
-Results, in order:
+Check the memory manager before dumping anything irreplaceable. LINGO maps
+32 K of upper memory at `D000`; if a memory manager holds it as UMB the
+window never reaches the card and the dump is zeroes — completing normally,
+with a checksum. It happened here: 12 MB of nothing, CRC `01FB2CCD`, the
+CRC of that many zero bytes. Exclude `D000-D7FF` (16 K is not enough), use
+`/SEG`, or dump from a clean boot. LINGO 1.8+ flags a one-byte dump; the
+CRC against a master is the real check.
 
-| Experiment | Result |
-|---|---|
-| PRETEC + English image, single copy | no POST |
-| PRETEC + English image **tiled ×32** | **boots** |
-| SRAM 2 MB + English image **tiled ×4** | **boots** — despite blank, unwritable attribute space |
-| Newton 4 MB + English image tiled ×8 | no POST |
-| Newton, tiled ×8, attribute space blanked to match the SRAM profile | no POST |
+## Finding more cards
 
-The SRAM boot is the theory-killer for everything that came before: a card
-with **no attribute space at all** boots, so the attribute-based theories
-(v4–v6.1) were red herrings top to bottom. The single-copy refusals of the
-SRAM and Newton cards had been the mirror check all along.
+Two filters. A card needs both.
 
-**The rules as now known:**
+1. Byte-steered. Intel's Series 2 card specification put the 8/16-bit
+   steering on the card, and faithful Series 2 designs inherit it. The
+   Value Series dropped it: the VS200 is four unsteered word pairs. Pretec
+   has since discontinued its dual cards and sells "8-bit only" or "16-bit
+   only"; "16-bit only" is most plausibly word-only, "8-bit only" is
+   untested in the D slot.
+2. Intel-family silicon: 28F008SA (`89/A2`) or Sharp LH28F008SA (`B0/A2`).
+   The Newton shows byte access is not enough.
 
-- **FFS2 generation** (German-style): image written as-is; no mirror
-  check; card may be larger than the image. Byte-accessible flash proven.
-- **FAT12 generation** (English-style): image **tiled to fill the card**;
-  the loader runs happily on word-only cards (its own ROM card is one),
-  so this generation should even suit word-only flash — untested but
-  predicted (see open threads).
-- Attribute space: irrelevant. Write-protect: irrelevant.
+Plus 12 MB or more for the 425 images, and 200 ns.
 
-**What remains unexplained — the AMD wall**: the Newton card, with
-content, attribute space, byte-accessibility and WP state all equalized
-against the booting SRAM card, is still refused. The machine distinguishes
-AMD flash from SRAM below the level of any byte we can present. Leading
-candidate: the scan performs a write-and-readback (SRAM answers, flash
-ignores) and the write-ignoring path gates on something the Newton fails —
-READY/WAIT behavior, BVD wiring, sense pins. The definitive instrument is
-a **logic analyzer on the D-slot bus during POST**, which would show the
-scan sequence outright.
+Candidates, best first. All are candidates until probed.
+
+- PRETEC `FR2016` (also `FR2008`, `FR2004`): the proven family. `FJX016M6W`
+  is a different family.
+- Intel `iMC016FLSA` / `iMC020FLSA`: Series 2, the reference design.
+- Series 2+ (`iMC0xxFLSP`, 28F016SA/SV): reported working; not verified
+  here. This is what most cheap Cisco RSP
+  and 2500 flash cards are. Series 2+ is not one chip: `28F016SA` is 12 V
+  Vpp, `28F016SV` is 5/12 V SmartVoltage. Confirm the ID and Vpp on the
+  first one to arrive and correct LINGO's table.
+- Centennial `FL16M`/`FL20M`, Sharp-branded cards: Series 2 compatibles.
+- Viking, Smart Modular, Simple Technology, Kingston: made compatibles;
+  part-specific.
+
+Avoid: Intel Value Series 100/200 (word-only); AMD-based cards — AMD
+`AmC0xxFLKA`, Fujitsu MBM29F, the Newton (the wall); StrataFlash
+(`28F128J3`, `28F640J3`, and most later Cisco cards).
+
+On arrival:
+
+```
+LINGO /PROBE
+    window: 16-bit OK             byte-steered
+    PROBE: ... id 89/A2 or B0/A2  Intel-family silicon
+    WORD-ONLY card                reject (the VS200 fails both generations)
+    id 01/xx                      AMD: reject for the D slot
+```
+
+Then a 425 image in the D slot is the test.
 
 ## Open threads
 
-- **Build the first custom FAT12 D card** — every ingredient proven: HP
-  CIS header + own FAT12 volume (mtools) + firmware blob at original
-  offsets, tiled to fill the card, written with LINGO. The original
-  campaign goal, now recipe work.
-- **VS200 + English image tiled ×32**: prognosis upgraded to *good* — the
-  FAT12 loader provably runs on word-only cards (its own ROM card is one),
-  and the VS200's hang happened with the byte-reading FFS2 path. If it
-  boots, every card class in the drawer has a working recipe.
-- **The logic-analyzer expedition**: capture the D-slot bus during POST to
-  identify how the machine distinguishes AMD flash from SRAM (the last
-  unexplained refusal).
-- **FFS2 format analysis** of the German master image → custom application
-  cards for the 1.1S generation too.
-- LINGO: first-class `ATTR READ/WRITE` commands (the `ATTRIO` probe covers
-  this for now), and the AMD word engine. *(`/TILE` shipped in 1.9.)*
-- The spare region above the image on oversized cards → a read-only second
-  drive with our own DOS driver.
-- Whether the OmniBook tolerates slower-than-200 ns cards.
-- An AMD word engine in LINGO (AMD-chip cards currently write via the slow
-  byte path).
+- First custom FAT12 D card: HP CIS header + own FAT12 volume + firmware
+  at the original offsets, `/TILE`, written with LINGO. The original goal.
+- First custom 1.1S card: a read-only FFS2 volume; format analysis of the
+  German master.
+- The VS200 and the AMD wall may be one thing. Every card that boots —
+  mask ROM, PRETEC, both SRAMs — is bare memory plus decode; both that fail
+  carry a controller ASIC, and a controller can drive `WAIT#` where bare
+  cards never do. A PCIC honours `WAIT#`; a ROM-oriented D slot may not.
+  One scope probe on pin 59 during a PC110 read of each card would show
+  it. Failing that, the logic analyzer on the opened card.
+- Logic analyzer on the opened card during POST: the AMD wall.
+- A Series 2+ card in the D slot, to verify the report.
+- The spare region above the image on oversized cards as a second drive.
+- Slower-than-200 ns cards.
+- LINGO: `ATTR` commands (`ATTRIO` covers it), an AMD word engine.

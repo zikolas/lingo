@@ -77,6 +77,8 @@ static int o_w8 = 0;          /* /W8: force 8-bit window ops              */
 static int o_w16 = 0;         /* /W16: force word-only card handling      */
 static int o_ws = -1;         /* /WS n: force n window wait states (0-3)  */
 static int cur_ws = 0;        /* wait states currently on the windows     */
+static int lane_ok = -1;      /* odd byte via CE2# correct? -1 untested   */
+static unsigned char lane_got, lane_want;   /* first mismatch, for INFO   */
 static int o_nocrc = 0;       /* /NOCRC: skip CRC-32 on READ              */
 static int o_nobuf = 0;       /* /NOBUF: no 0xE8 buffered writes          */
 static int use16 = 0;         /* 16-bit data window verified working      */
@@ -218,6 +220,20 @@ static void detect_w16(void)
     for (i = 0; i < 64; i++) b8[i] = *cmem((unsigned long)i);
     win1_datasize(1);
     for (i = 0; i < 32; i++) w16[i] = *cmem16((unsigned long)i * 2);
+    /* Byte reads through the 16-bit window: the PCIC drives CE1# alone for
+     * an even address and CE2# alone for an odd one - the way a 16-bit host
+     * fetches a byte. That is a different path from 8-bit mode (CE1# with
+     * A0), which is what the byte view above measured, and a card can honour
+     * one and not the other. Only meaningful if the card turns out 16-bit. */
+    for (i = 0, lane_ok = 1; i < 32; i++) {
+        unsigned char lo = *wp8(1, i * 2), hi = *wp8(1, i * 2 + 1);
+        if (lo != (unsigned char)(w16[i] & 0xFF)) {
+            lane_ok = 0; lane_got = lo; lane_want = (unsigned char)(w16[i] & 0xFF); break;
+        }
+        if (hi != (unsigned char)(w16[i] >> 8)) {
+            lane_ok = 0; lane_got = hi; lane_want = (unsigned char)(w16[i] >> 8); break;
+        }
+    }
     for (i = 0; i < 32; i++) {
         if ((unsigned char)(w16[i] & 0xFF) != b8[i * 2] ||
             (unsigned char)(w16[i] >> 8)   != b8[i * 2 + 1]) { same = 0; break; }
@@ -529,6 +545,7 @@ static struct devrec devtab[] = {
     { 0xB0, 0xA2, "Sharp LH28F008SA",  1024, 64, T_INTEL,   1 },
     { 0x89, 0xA0, "Intel 28F016SA",    2048, 64, T_INTEL,   0 },
     { 0x89, 0xA6, "Intel 28F008-S",    1024, 64, T_INTEL,   0 },
+    { 0x89, 0x14, "Intel 28F016S5",    2048, 64, T_INTEL,   0 },
     { 0x89, 0xB4, "Intel 28F010",       128,  0, T_SERIES1, 1 },
     { 0x89, 0xBD, "Intel 28F020",       256,  0, T_SERIES1, 1 },
     { 0x01, 0xA4, "AMD Am29F040",       512, 64, T_AMD,     0 },
@@ -1313,6 +1330,13 @@ static int op_info(void)
     printf("    window: %s\n",
            byte_broken ? "16-bit (WORD-ONLY card - ignores A0 on byte cycles)"
                        : use16 ? "16-bit OK (fast ops)" : "8-bit");
+    if (use16) {
+        if (lane_ok)
+            printf("    lanes:  byte via CE1#/CE2# OK (16-bit host byte access)\n");
+        else
+            printf("    lanes:  byte via CE1#/CE2# WRONG - got %02X, expected %02X\n"
+                   "            (card ignores lane select)\n", lane_got, lane_want);
+    }
     parse_cis(1);
     if (o_probe) {
         probe_card();
@@ -1688,6 +1712,7 @@ static void usage(void)
     printf("Options: /S n socket, /OFF n, /LEN n, /SIZE n, /BLK n (nums: 0x.., K, M)\n");
     printf("  /TYPE INTEL|AMD|SRAM, /X1 /X2 lanes, /VPP 0|5|12, /SEG n (def D000)\n");
     printf("  VPPTEST  check what the socket's Vpp switch accepts (writes nothing)\n");
+    printf("  LANETEST do byte writes reach one lane or both? (Intel flash; ID cmds)\n");
     printf("  /VDIAG trace Vpp changes; /S n socket 0-7 (chip 3E0+(n&~1), bank n&1)\n");
     printf("  /TILE  repeat the file to fill the card - mirrors a small ROM\n");
     printf("  /NOERASE /NOVERIFY /ALL /Y (no confirm)\n");
@@ -1724,6 +1749,59 @@ static void op_vpptest(void)
                "  12V still needs a 12V part to program successfully.\n");
 }
 
+/* LANETEST: does a byte WRITE through the 16-bit window reach only the lane
+ * it was aimed at? INFO checks the read side of lane steering; this is the
+ * write side, which a host exercises with any byte write. On Intel flash
+ * every write is a command, so a byte that lands on both chips of a pair
+ * leaves the wrong chip in ID or status mode and the next fetch returns
+ * garbage. Uses only read-ID (0x90) and read-array (0xFF), Vpp off: nothing
+ * here can program or erase.                                              */
+static void lane_verdict(unsigned short before, unsigned short after)
+{
+    if (after == before)
+        printf("     -> reached NEITHER chip\n");
+    else if ((after & 0xFF) == (before & 0xFF))
+        printf("     -> only the HIGH lane changed\n");
+    else if ((after >> 8) == (before >> 8))
+        printf("     -> only the LOW lane changed\n");
+    else
+        printf("     -> the WHOLE WORD changed: no lane isolation on writes\n");
+}
+static void op_lanetest(void)
+{
+    unsigned short w0, w1, w2;
+    if (!use16) { printf("  8-bit window - nothing to test\n"); return; }
+    probe_card();
+    if (ctype != T_INTEL) {
+        printf("  needs an Intel-CUI flash card (this is %s)\n", type_name(ctype));
+        return;
+    }
+    read_array_mode();
+    w0 = *cmem16(0L);
+    printf("  array word @0            : %04X\n", w0);
+
+    *wp8(1, 1) = 0x90; dly(100);                     /* odd: CE2# alone      */
+    w1 = *cmem16(0L);
+    printf("  0x90 as a BYTE to addr 1 : %04X   (odd address = CE2# alone)\n", w1);
+    lane_verdict(w0, w1);
+    *wp8(1, 1) = 0xFF; *cmem16(0L) = 0xFFFF; dly(100);
+
+    *wp8(1, 0) = 0x90; dly(100);                     /* even: CE1# alone     */
+    w1 = *cmem16(0L);
+    printf("  0x90 as a BYTE to addr 0 : %04X   (even address = CE1# alone)\n", w1);
+    lane_verdict(w0, w1);
+    *wp8(1, 0) = 0xFF; *cmem16(0L) = 0xFFFF; dly(100);
+
+    *cmem16(0L) = 0x9090; dly(100);                  /* word: both, reference */
+    w1 = *cmem16(0L);
+    printf("  0x9090 as a WORD to addr 0: %04X   (both lanes, for reference)\n", w1);
+    *cmem16(0L) = 0xFFFF; dly(100);
+
+    w2 = *cmem16(0L);
+    printf("  after reset              : %04X%s\n", w2,
+           w2 == w0 ? "" : "   ! did not return to array data");
+}
+
 static void no_pcic(void)
 {
     printf("! no 82365-class PCIC found (scanned 3E0/3E2/3E4/3E6)\n"
@@ -1737,6 +1815,7 @@ static void no_pcic(void)
 #define C_ERASE 3
 #define C_VERIFY 4
 #define C_VPPTEST 5
+#define C_LANETEST 6
 
 int main(int argc, char **argv)
 {
@@ -1790,6 +1869,7 @@ int main(int argc, char **argv)
         else if (!stricmp(a, "ERASE"))  cmd = C_ERASE;
         else if (!stricmp(a, "VERIFY")) cmd = C_VERIFY;
         else if (!stricmp(a, "VPPTEST")) cmd = C_VPPTEST;
+        else if (!stricmp(a, "LANETEST")) cmd = C_LANETEST;
         else if (!fn) fn = a;
         else { printf("unexpected argument: %s\n", a); usage(); return 1; }
     }
@@ -1797,7 +1877,7 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LINGO 1.9 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.10 - linear flash / SRAM card reader-writer\n");
 
     crc_init();
 
@@ -1868,6 +1948,7 @@ int main(int argc, char **argv)
     case C_ERASE:  ret = op_erase();    break;
     case C_VERIFY: ret = op_verify(fn); break;
     case C_VPPTEST: op_vpptest(); ret = 0; break;
+    case C_LANETEST: op_lanetest(); ret = 0; break;
     }
     close_socket();
     return ret;

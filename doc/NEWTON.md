@@ -49,8 +49,9 @@ The OmniBook still declined, silently, exactly as if the slot were empty.
 
 *(Written before the mirror-check discovery; superseded — see below.)*
 At this stage the suspects were deeper attribute walks and physical
-probing. The mirror check (`OMNIBOOK.md`, third revision) then explained
-the single-copy refusals — and prompted two more Newton attempts.
+probing. The mirror check (`OMNIBOOK.md`, "What the OmniBook checks")
+then explained the single-copy refusals — and prompted two more Newton
+attempts.
 
 ## Act two: the mirror check changes everything — except the verdict
 

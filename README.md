@@ -65,6 +65,8 @@ LINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
   ERASE             erase /LEN bytes at /OFF, or /ALL
   VERIFY file       compare card against file
   VPPTEST           report what the socket's Vpp switch accepts (writes nothing)
+  LANETEST          do byte writes reach one lane or both? (Intel flash;
+                    read-ID and read-array commands only, Vpp off)
 
   /S n              socket 0-7 (default: first with a card)
   /OFF /LEN         range; numbers take 0x-hex and K/M suffixes
