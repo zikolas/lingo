@@ -167,11 +167,14 @@ LINGO WRITE 430.IMG /TILE /SIZE 2M         fill a 2 MB flash or SRAM card
 ```
 
 Full story, including which cards are eligible and why, in
-[doc/OMNIBOOK.md](doc/OMNIBOOK.md).
+[doc/OMNIBOOK.md](doc/OMNIBOOK.md) — its "Finding more cards" section
+decodes Centennial, Smart Modular and Pretec part numbers so a listing can
+be judged before buying, and names the one-character trap: "Series 2
+compatible" is the good family, "Series 200 compatible" is not.
 
 ## What it knows
 
-- **Intel CUI flash** (28F008SA, Sharp LH28F008SA, 28F016 S-series, …):
+- **Intel CUI flash** (28F008SA, Sharp LH28F008SA, 28F016SA, 28F016S5, …):
   block erase + program with status polling. Vpp is off except around a
   program or erase, and is then asserted at the voltage the chip actually
   wants — 12 V for the older parts, 5 V otherwise. Where the chip's CFI
@@ -181,10 +184,16 @@ Full story, including which cards are eligible and why, in
   correct command addressing, status masks and erase-block geometry, driven
   through 16-bit window cycles when the socket supports them (both chips of
   a pair program in parallel).
-- **Word-only cards**: some cards (e.g. Intel Value Series 200) ignore `A0`
-  and cannot do byte cycles at all — byte reads silently double every even
-  byte and byte writes corrupt. LINGO detects this and switches everything
-  to word cycles; any byte-oriented tool would trash such a card.
+- **Word-only cards**: some cards (e.g. Intel Value Series 200, and the
+  Viking/Cisco 24 MB cards built on the same 28F016S5) ignore `A0` on
+  8-bit-mode byte cycles — byte reads silently double every even byte and
+  byte writes land on the wrong cell. LINGO detects this and switches
+  everything to word cycles; any byte-oriented tool would trash such a
+  card. INFO also reports a `lanes:` line on 16-bit cards — whether an odd
+  byte fetched the way a 16-bit host does it, `CE2#` alone, comes back
+  right — and `LANETEST` measures the write side of the same thing. The
+  two are independent: the VS200 passes the lane read test and has no
+  lane isolation on writes.
 - **Slow cards**: window wait states are auto-tuned against stale-read
   behavior on tight back-to-back cycles (`/WS` overrides).
 - **AMD-style flash** (Am29F040/080/016/017, Fujitsu, ST, …): unlock-sequence
