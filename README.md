@@ -147,9 +147,12 @@ LINGO VERIFY 425.IMG /SIZE 12M             second pass = trustworthy master
 Do **not** add `/PROBE` to a donor: reading is passive, identification is
 not, and you do not need the chip identity to dump a card.
 
-To write the clone, the target must be **byte-accessible** — `INFO` must say
-`window: 16-bit OK`, not `WORD-ONLY card`. A word-only card can hold the
-image perfectly and still hang the OmniBook's POST:
+To write the clone, the target needs Intel-family silicon and room for the
+image. Word-only cards, ones that cannot be read a byte at a time (see
+[What it knows](#what-it-knows)), are fine: LINGO writes them with word
+cycles and the OmniBook only ever reads words. A card with a controller chip also needs a
+one-resistor fix, because the OmniBook's D slot never drives `RESET` and
+such a card sits in reset for ever; see the doc.
 
 ```
 LINGO /PROBE                               qualify the target (writes ID cmds)
@@ -167,10 +170,10 @@ LINGO WRITE 430.IMG /TILE /SIZE 2M         fill a 2 MB flash or SRAM card
 ```
 
 Full story, including which cards are eligible and why, in
-[doc/OMNIBOOK.md](doc/OMNIBOOK.md) — its "Finding more cards" section
-decodes Centennial, Smart Modular and Pretec part numbers so a listing can
-be judged before buying, and names the one-character trap: "Series 2
-compatible" is the good family, "Series 200 compatible" is not.
+[doc/OMNIBOOK.md](doc/OMNIBOOK.md) — "The bus, measured" has the D slot's
+wiring, "The reset wall" the resistor, and "Finding more cards" decodes
+Centennial, Smart Modular and Pretec part numbers so a listing can be
+judged before buying.
 
 ## What it knows
 

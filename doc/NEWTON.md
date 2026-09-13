@@ -74,6 +74,14 @@ something else the Newton fails — READY/WAIT behavior, BVD wiring, or
 sense pins. The instrument that settles it is a logic analyzer on the
 D-slot bus during POST.
 
+**Update, after the D-slot bus was measured** (`OMNIBOOK.md`, "The bus,
+measured"): the probe-byte candidate above is dead, the slot has `WE#` tied
+to Vcc and cannot write. The slot also never drives `RESET`, which turned
+out to be the VS200's whole problem, but the Newton card pulls its own
+`RESET` down and still refuses with a pull-down fitted, so its case is a
+second mechanism. The remaining suspects and the next measurements are in
+`OMNIBOOK.md`, open threads.
+
 So the AMD verdict stands, now with full rigor: not the CIS, not the
 content, not the mirror — the silicon. The consolation prizes stand too:
 the writable attribute EEPROM, the toolkit, and a refusal so thoroughly

@@ -57,9 +57,10 @@ Consequences (unchanged in practice):
   attribute space aliases common memory or is writable — this card has
   neither — and per the Newton results possibly more than that. The
   **PRETEC is the working lab card** (~5 min per rewrite cycle).
-- Corollary for card shopping: attribute-space behavior joins
-  byte-accessibility on the qualification list, with the caveat that the
-  full acceptance mechanism is still unmapped.
+- Corollary for card shopping, as it stood then: attribute-space behavior
+  joins byte-accessibility on the qualification list. Both have since been
+  struck off; the D slot never reads attribute space and only reads words
+  (`OMNIBOOK.md`, "What turned out not to matter").
 
 The original idea and plan follow, for context.
 
@@ -73,8 +74,9 @@ the multi-minute flash erase/program cycle.
 
 ## Why it's plausible
 
-- The D slot's one hard requirement is **byte-accessibility**
-  (see `OMNIBOOK.md`) — SRAM is the most byte-accessible memory there is.
+- The D slot only ever reads 16-bit words and never writes (see
+  `OMNIBOOK.md`, "The bus, measured") — SRAM answers that trivially and
+  has no controller to sit in reset.
 - Everything the OmniBook checks lives in **common memory**, which we fully
   control: the CIS, the FFS2 store, and the firmware the machine executes
   during POST. The attribute CIS is provably ignored.
