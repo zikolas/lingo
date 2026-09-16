@@ -81,6 +81,7 @@ and prints a checksum too.
 | Viking VPK1216T5200 24 MB | E28F016S5 (`89/14`), x16, 6 banks. Also sold as Cisco `MEM-C6K-FLC24M`, "Series 200 Compatible". Another OmniBook owner's card. | word-only |
 | Apple Newton 4 MB | AMD Am29F017 pair (`01/3D`), controller ASIC | 16-bit OK |
 | Smart Modular 20 MB SM9FA520 | 10 × Sharp LH28F016SC, Smart controller ASIC | A1/A2 bridged, dead |
+| Smart Modular 4 MB SM9FCSC4M001 (Cisco 1600/1700) | 2 × AMD Am29F016 (`01/AD`), Smart controller ASIC | reads double on 8-bit cycles, writes reach both lanes; LINGO 1.11 drives it with word cycles |
 
 "16-bit OK" and "word-only" are LINGO's `INFO` verdicts on how the card
 answers byte cycles. They decide how LINGO drives the card; whether they
@@ -166,12 +167,14 @@ booting the 430, and the hardware agrees.
 
 ### The AMD case
 
-The Apple Newton card (AMD `01/3D`) still does not POST with the reset
-pull-down fitted. It carries its own pull-down on `RESET` and reads 0 V
-there with nothing added, so the reset wall was never its problem, and its
-image verifies on the PC110. This is a second mechanism, not the same one,
-and it is parked: one AMD card in a niche use. The candidates and the next
-measurements are in the open threads.
+Two AMD cards now refuse with the pull-down fitted: the Apple Newton card
+(AMD `01/3D`) and the Smart Modular `SM9FCSC4M001` (AMD `01/AD` pair). Both
+hold `RESET` at 0 V themselves, so the reset wall was never their problem.
+Both images verify on the PC110, the Smart card's through the same 16-bit
+read path the D slot uses, so the content is not in question either. Every
+card that boots is Intel silicon, mask ROM or SRAM; every card that refuses
+is AMD. This is a second mechanism and it is parked. The candidates and the
+next measurements are in the open threads.
 
 ## Card verdicts
 
@@ -184,6 +187,7 @@ measurements are in the open threads.
 | VS200 | Boots both generations with `RESET` pulled down: the tiled 430 image, then the ABA FFS2 image. Without the pull-down it sits in reset and hangs POST. Byte-path tools corrupt it; LINGO handles it. |
 | Viking 24 MB | Same silicon and signature as the VS200. Tested by its owner with the 425 ABA image and no pull-down: no POST. Expected to boot with the reset fix; unverified. |
 | Apple Newton 4 MB | Refused in every configuration, with and without the reset pull-down. Pulls its own `RESET` down. A second mechanism, parked (`NEWTON.md`). |
+| SM9FCSC4M001 | Refused with the tiled 430 image, with and without the pull-down; drives `RESET` low itself. Content verified by a word-path read against the image. Second member of the AMD wall. |
 | Smart Modular 20 MB SM9FA520 | Never reached the slot: A1/A2 bridged. |
 
 ## Cloning a card
@@ -273,8 +277,9 @@ Candidates. All are candidates until probed.
   Cisco's own install note specifies as Intel Series 2+ (the dead `SM9FA520`
   was a bad unit, not a bad family; its board carries a Smart controller,
   so expect the reset fix); `SM9FCSC` = the Cisco 1600/1700 cards, 2-16 MB,
-  Intel family, silicon unconfirmed. `SM9AMD` is AMD, `SM9DRS` is DRAM,
-  neither is a candidate.
+  and the 4 MB one probed as an AMD Am29F016 pair, so the family is AMD
+  and not a candidate. `SM9AMD` is AMD, `SM9DRS` is DRAM, neither is a
+  candidate.
 - Simple Technology, Kingston: made compatibles; part-specific.
 
 Pretec's own prefixes decode the chip directly: `F62` = Series II
@@ -325,4 +330,4 @@ reset fix first, then judge.
   analysis.
 - The spare region above the image on oversized cards as a second drive.
 - Slower-than-200 ns cards.
-- LINGO: `ATTR` commands (`ATTRIO` covers it), an AMD word engine.
+- LINGO: `ATTR` commands (`ATTRIO` covers it).

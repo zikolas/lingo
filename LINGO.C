@@ -543,7 +543,7 @@ struct devrec {
 static struct devrec devtab[] = {
     { 0x89, 0xA2, "Intel 28F008SA",    1024, 64, T_INTEL,   1 },
     { 0xB0, 0xA2, "Sharp LH28F008SA",  1024, 64, T_INTEL,   1 },
-    { 0x89, 0xA0, "Intel 28F016SA",    2048, 64, T_INTEL,   0 },
+    { 0x89, 0xA0, "Intel 28F016SA",    2048, 64, T_INTEL,   1 },  /* 12V; SV takes 12V too */
     { 0x89, 0xA6, "Intel 28F008-S",    1024, 64, T_INTEL,   0 },
     { 0x89, 0x14, "Intel 28F016S5",    2048, 64, T_INTEL,   0 },
     { 0x89, 0xB4, "Intel 28F010",       128,  0, T_SERIES1, 1 },
@@ -700,6 +700,30 @@ static int try_intel_w(int force)
     return 1;
 }
 
+/* AMD identification through 16-bit cycles: an x8 pair answers the unlock
+ * with the manufacturer on both lanes (0101), a single x16 chip with it on
+ * the low lane only (0001).  This is the only path that reaches the chips
+ * on a card whose controller drops A0 on 8-bit cycles.                   */
+static int try_amd_w(int force)
+{
+    unsigned short w0, w1;
+    *cmem16(0L) = 0xF0F0; dly(50);
+    *cmem16(0x555UL * 2) = 0xAAAA;
+    *cmem16(0x2AAUL * 2) = 0x5555;
+    *cmem16(0x555UL * 2) = 0x9090; dly(50);
+    w0 = *cmem16(0L); w1 = *cmem16(2L);
+    *cmem16(0L) = 0xF0F0; dly(50);
+    if (!force && !amd_mfr_ok((unsigned char)(w0 & 0xFF))) return 0;
+    id_mfr = (unsigned char)(w0 & 0xFF);
+    if ((w0 >> 8) == (w0 & 0xFF)) {
+        org = ORG_PAIR; nlanes = 2; id_dev = (unsigned char)(w1 & 0xFF);
+    } else {
+        org = ORG_X16; nlanes = 1; id_dev = (unsigned char)(w1 & 0xFF);
+    }
+    amd_a1 = 0x555; amd_a2 = 0x2AA;
+    return 1;
+}
+
 static int try_cfi_w(void)
 {
     unsigned short q, r, y;
@@ -806,7 +830,9 @@ static void probe_card(void)
         ctype = T_INTEL;
         if (use16) try_intel_w(1); else try_intel(1);
     } else if (o_type == T_AMD) {
-        ctype = T_AMD; try_amd(1);
+        ctype = T_AMD;
+        if (use16 && try_amd_w(0)) ; else if (!byte_broken) try_amd(1);
+        else try_amd_w(1);
     } else {
         if (cis_dtype == 6 && !byte_broken && try_sram()) ctype = T_SRAM;
         if (ctype == T_UNKNOWN) {
@@ -814,6 +840,7 @@ static void probe_card(void)
             else       { if (try_intel(0))   ctype = T_INTEL; }
         }
         if (ctype == T_UNKNOWN && !byte_broken && try_amd(0)) ctype = T_AMD;
+        if (ctype == T_UNKNOWN && use16 && try_amd_w(0)) ctype = T_AMD;
         if (ctype == T_UNKNOWN) {
             if (use16) { if (!try_cfi_w() && !byte_broken) try_cfi(); }
             else try_cfi();
@@ -976,7 +1003,7 @@ static long intel_progw_byte(unsigned long addr, unsigned char val)
 
 static int wide_ok(void)                             /* word engine usable?  */
 {
-    return use16 && ctype == T_INTEL &&
+    return use16 && (ctype == T_INTEL || ctype == T_AMD) &&
            (org == ORG_PAIR || org == ORG_X16) && (o_off & 1) == 0;
 }
 
@@ -1057,6 +1084,78 @@ static long amd_erase_blk(unsigned long baddr)
     return 0;
 }
 
+/* ---- AMD word engine: both lanes get the same command, the poll reads the
+ * real word.  On a card whose controller serves the even byte for every
+ * 8-bit read, the byte engine's DQ7 poll on the odd lane watches the wrong
+ * chip - a word poll cannot be fooled that way.                          */
+static void amd_cmd_w(unsigned short c)
+{
+    unsigned short u = (org == ORG_X16) ? 0x00AA : 0xAAAA;
+    unsigned short v = (org == ORG_X16) ? 0x0055 : 0x5555;
+    *cmem16(0x555UL * 2) = u;
+    *cmem16(0x2AAUL * 2) = v;
+    *cmem16(0x555UL * 2) = c;
+}
+
+static long amd_progw(unsigned long addr, unsigned short val)
+{
+    volatile unsigned short __far *p;
+    unsigned n; unsigned short r, dq5 = (org == ORG_X16) ? 0x0020 : 0x2020;
+    amd_cmd_w((org == ORG_X16) ? 0x00A0 : 0xA0A0);
+    p = cmem16(addr);                                /* AFTER the unlock: it
+                                                      * repages the window  */
+    *p = val;
+    for (n = 0; n < 60000U; n++) {
+        r = *p;
+        if (r == val) return 0;
+        {
+            unsigned short mis = (unsigned short)((r ^ val) & 0x8080);
+            if (r & dq5 & (mis >> 2)) {              /* that lane timed out */
+                r = *p;
+                if (r == val) return 0;
+                *cmem16(addr) = 0xF0F0;
+                return 0x10000L | r;
+            }
+        }
+    }
+    return -1;
+}
+
+static long amd_progw_byte(unsigned long addr, unsigned char val)
+{
+    unsigned short w = (addr & 1) ? (unsigned short)(((unsigned)val << 8) | 0x00FF)
+                                  : (unsigned short)(0xFF00 | val);
+    return amd_progw(addr & ~1UL, w);
+}
+
+static long amd_erase_blkw(unsigned long baddr)
+{
+    volatile unsigned short __far *p;
+    unsigned long t0; unsigned short r, dq5 = (org == ORG_X16) ? 0x0020 : 0x2020;
+    amd_cmd_w((org == ORG_X16) ? 0x0080 : 0x8080);
+    *cmem16(0x555UL * 2) = (org == ORG_X16) ? 0x00AA : 0xAAAA;
+    *cmem16(0x2AAUL * 2) = (org == ORG_X16) ? 0x0055 : 0x5555;
+    p = cmem16(baddr);                               /* after the unlock    */
+    *p = (org == ORG_X16) ? 0x0030 : 0x3030;         /* at the block        */
+    t0 = ticks();
+    for (;;) {
+        unsigned short busy;
+        r = *p;
+        if (r == 0xFFFF) break;
+        /* DQ5 means timeout only on a lane whose DQ7 is still low; the
+         * other lane of a pair may already read FF                        */
+        busy = (unsigned short)(~r & ((org == ORG_X16) ? 0x0080 : 0x8080));
+        if ((r & dq5) && (r & dq5 & (busy >> 2))) {
+            r = *p;
+            if (r == 0xFFFF) break;
+            *cmem16(baddr) = 0xF0F0;
+            return 0x10000L | r;                     /* status word for the log */
+        }
+        if (ticks() - t0 > 728UL) { *cmem16(baddr) = 0xF0F0; return -1; }
+    }
+    return 0;
+}
+
 static void read_array_mode(void)
 {
     if (ctype == T_INTEL || ctype == T_SERIES1) {
@@ -1099,7 +1198,10 @@ static long erase_block(unsigned long addr)
         if (wide_ok()) return intel_erase_blkw(addr);
         return intel_erase_blk(addr);
     }
-    if (ctype == T_AMD)   return amd_erase_blk(addr);
+    if (ctype == T_AMD) {
+        if (wide_ok()) return amd_erase_blkw(addr);
+        return amd_erase_blk(addr);
+    }
     return 0;
 }
 
@@ -1422,8 +1524,8 @@ static int op_write(const char *fn)
     }
     probe_card();
     use_buf = (cfi_bufsz >= 2 && (o_off & 63) == 0 && !o_nobuf);
-    if (byte_broken && ctype != T_INTEL && ctype != T_SRAM) {
-        printf("  ! word-only card: only Intel-CUI flash (or SRAM) writable\n");
+    if (byte_broken && !wide_ok() && ctype != T_SRAM) {
+        printf("  ! word-only card: needs a pair or x16 chip the word engine can drive\n");
         return 1;
     }
     if (ctype == T_UNKNOWN || ctype == T_ROM || ctype == T_SERIES1) {
@@ -1470,7 +1572,8 @@ static int op_write(const char *fn)
     printf("        %s", type_name(ctype));
     if (ctype != T_SRAM) {
         printf(", %s %s, Vpp %dV", chip_name, orgname(), vpp_want());
-        if (use_buf && wide_ok()) printf(", buffered x2");
+        if (use_buf && wide_ok() && ctype == T_INTEL) printf(", buffered x2");
+        else if (wide_ok()) printf(", word cycles");
     }
     printf("\n");
     /* the destructive part gets its own line, short enough not to wrap at
@@ -1527,14 +1630,15 @@ static int op_write(const char *fn)
                 for (k = 0; k < span; k++)
                     if (bw[i + k] != 0xFFFF) { allff = 0; break; }
                 if (!allff) {
-                    if (use_buf) {
+                    if (use_buf && ctype == T_INTEL) {
                         r = intel_bufw(a + (unsigned long)i * 2, bw + i, span);
                         if (r == -3) { use_buf = 0; continue; }  /* fallback */
                     } else {
                         for (k = 0; k < span && !r; k++) {
                             if (bw[i + k] == 0xFFFF) continue;
-                            r = intel_progw(a + (unsigned long)(i + k) * 2,
-                                            bw[i + k]);
+                            r = (ctype == T_AMD)
+                              ? amd_progw(a + (unsigned long)(i + k) * 2, bw[i + k])
+                              : intel_progw(a + (unsigned long)(i + k) * 2, bw[i + k]);
                         }
                         if (r && k) i += k - 1;      /* point at the failure */
                     }
@@ -1544,7 +1648,9 @@ static int op_write(const char *fn)
             }
             if (!r && (got & 1)) {                   /* odd tail byte        */
                 i = got - 1;
-                if (buf[i] != 0xFF) r = intel_progw_byte(a + i, buf[i]);
+                if (buf[i] != 0xFF)
+                    r = (ctype == T_AMD) ? amd_progw_byte(a + i, buf[i])
+                                         : intel_progw_byte(a + i, buf[i]);
             }
             if (r) {
                 printf("\n  ! program failed at 0x%lX (code %04lX%s)\n",
@@ -1712,12 +1818,13 @@ static void usage(void)
     printf("Options: /S n socket, /OFF n, /LEN n, /SIZE n, /BLK n (nums: 0x.., K, M)\n");
     printf("  /TYPE INTEL|AMD|SRAM, /X1 /X2 lanes, /VPP 0|5|12, /SEG n (def D000)\n");
     printf("  VPPTEST  check what the socket's Vpp switch accepts (writes nothing)\n");
-    printf("  LANETEST do byte writes reach one lane or both? (Intel flash; ID cmds)\n");
+    printf("  LANETEST do byte writes reach one lane or both? (Intel; ID cmds)\n"
+           "           with /TYPE AMD: identify AMD chips through word cycles\n");
     printf("  /VDIAG trace Vpp changes; /S n socket 0-7 (chip 3E0+(n&~1), bank n&1)\n");
     printf("  /TILE  repeat the file to fill the card - mirrors a small ROM\n");
     printf("  /NOERASE /NOVERIFY /ALL /Y (no confirm)\n");
     printf("  /W8 (no 16-bit cycles) /W16 (force word-only) /WS n /NOBUF /NOCRC\n");
-    printf("Supports: Intel 28F008SA-family cards (12V Vpp), AMD 29F-style, SRAM.\n");
+    printf("Supports: Intel 28F008SA-family cards (12V Vpp), AMD 29F-style (byte or\n          word cycles), SRAM.\n");
 }
 
 /* Nothing answered at any of the four index ports. On a machine whose
@@ -1767,13 +1874,37 @@ static void lane_verdict(unsigned short before, unsigned short after)
     else
         printf("     -> the WHOLE WORD changed: no lane isolation on writes\n");
 }
+/* AMD identification through 16-bit cycles only: what a word-path host
+ * sees behind a controller.  Two unlock geometries - an x8 pair on the
+ * byte lanes (555/2AA as word addresses) and a single x16 chip (555/2AA
+ * as word addresses too, but the reply is 0001/00xx) - the raw words tell
+ * them apart.  Diagnostic: command bytes only, nothing programmed.       */
+static void amd_word_id(void)
+{
+    unsigned short w0, w1, w2;
+    w0 = *cmem16(0L);
+    printf("  array word @0            : %04X\n", w0);
+    *cmem16(0L) = 0xF0F0; dly(50);
+    *cmem16(0x555UL * 2) = 0xAAAA;
+    *cmem16(0x2AAUL * 2) = 0x5555;
+    *cmem16(0x555UL * 2) = 0x9090; dly(50);
+    w1 = *cmem16(0L); w2 = *cmem16(2L);
+    printf("  AMD unlock as WORDS      : %04X %04X   (0101/ADAD = x8 pair, 0001/00xx = one x16)\n", w1, w2);
+    *cmem16(0L) = 0xF0F0; dly(50);
+    w2 = *cmem16(0L);
+    printf("  after reset              : %04X%s\n", w2,
+           w2 == w0 ? "" : "   ! did not return to array data");
+}
+
 static void op_lanetest(void)
 {
     unsigned short w0, w1, w2;
     if (!use16) { printf("  8-bit window - nothing to test\n"); return; }
     probe_card();
+    if (ctype == T_AMD || o_type == T_AMD) { amd_word_id(); return; }
     if (ctype != T_INTEL) {
         printf("  needs an Intel-CUI flash card (this is %s)\n", type_name(ctype));
+        printf("  (/TYPE AMD runs the AMD word-mode identification instead)\n");
         return;
     }
     read_array_mode();
@@ -1877,7 +2008,7 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LINGO 1.10 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.11 - linear flash / SRAM card reader-writer\n");
 
     crc_init();
 

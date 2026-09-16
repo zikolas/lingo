@@ -67,6 +67,7 @@ LINGO [INFO|READ f|WRITE f|ERASE|VERIFY f] [options]
   VPPTEST           report what the socket's Vpp switch accepts (writes nothing)
   LANETEST          do byte writes reach one lane or both? (Intel flash;
                     read-ID and read-array commands only, Vpp off)
+                    with /TYPE AMD: identify AMD chips through word cycles
 
   /S n              socket 0-7 (default: first with a card)
   /OFF /LEN         range; numbers take 0x-hex and K/M suffixes
@@ -192,7 +193,12 @@ judged before buying.
   8-bit-mode byte cycles — byte reads silently double every even byte and
   byte writes land on the wrong cell. LINGO detects this and switches
   everything to word cycles; any byte-oriented tool would trash such a
-  card. INFO also reports a `lanes:` line on 16-bit cards — whether an odd
+  card. A third kind exists — the Smart Modular `SM9FCSC` (AMD pair behind
+  a controller) doubles on 8-bit reads but takes 8-bit writes correctly,
+  so a byte-path erase *poll* watches the wrong chip and reports done on a
+  block that never started. Word cycles are the only path that is right
+  on every card, and both engines now use them whenever the socket
+  offers 16-bit access. INFO also reports a `lanes:` line on 16-bit cards — whether an odd
   byte fetched the way a 16-bit host does it, `CE2#` alone, comes back
   right — and `LANETEST` measures the write side of the same thing. The
   two are independent: the VS200 passes the lane read test and has no
@@ -201,7 +207,9 @@ judged before buying.
   behavior on tight back-to-back cycles (`/WS` overrides).
 - **AMD-style flash** (Am29F040/080/016/017, Fujitsu, ST, …): unlock-sequence
   command set, DQ7/DQ5 polling, both x8 and x16-in-byte-mode unlock address
-  layouts, single or interleaved. These parts are single-supply — an
+  layouts, single or interleaved — and, on a 16-bit socket, the whole set
+  driven as word cycles with both chips of a pair commanded and polled
+  together, the same way the Intel pair engine works. These parts are single-supply — an
   Am29F017 card was measured programming and erasing with Vpp at 0 V — so a
   socket with no Vpp switch at all can still write them, where a 12 V-only
   Intel part cannot be written there.
