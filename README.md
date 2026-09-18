@@ -28,9 +28,12 @@ included for the older Intel parts.
   the card and every read comes back as zeroes** — host RAM reads `00`, where
   an erased card or an empty socket reads `FF`. The dump still completes and
   still prints a confident checksum. Exclude the range (`X=D000-D7FF` for
-  JemmEx/EMM386), move it with `/SEG`, or run from a clean boot. LINGO warns
-  when a dump is one repeated byte, but on an irreplaceable card check the
-  CRC against a known master.
+  JemmEx/EMM386), move it with `/SEG` (page-aligned, `A000`-`F800`), or run
+  from a clean boot. Since 1.12 LINGO maps both windows to the same card
+  page at open and refuses every operation when they show different bytes,
+  which is what a window on host RAM looks like; it also warns when a dump
+  is one repeated byte. On an irreplaceable card still check the CRC
+  against a known master.
 - **Two of the PCIC's five memory windows.** LINGO borrows two, preferring
   ones the controller has left disabled, and restores their registers exactly
   afterwards. If fewer than two are free it reuses ones already in use —

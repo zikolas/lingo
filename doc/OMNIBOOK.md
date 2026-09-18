@@ -231,8 +231,9 @@ Check the memory manager before dumping anything irreplaceable. LINGO maps
 window never reaches the card and the dump is zeroes — completing normally,
 with a checksum. It happened here: 12 MB of nothing, CRC `01FB2CCD`, the
 CRC of that many zero bytes. Exclude `D000-D7FF` (16 K is not enough), use
-`/SEG`, or dump from a clean boot. LINGO 1.8+ flags a one-byte dump; the
-CRC against a master is the real check.
+`/SEG`, or dump from a clean boot. LINGO 1.12 refuses to operate when its
+two windows disagree about the same card page, which is the UMB case, and
+flags a one-byte dump; the CRC against a master is the real check.
 
 ## Finding more cards
 

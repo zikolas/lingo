@@ -68,6 +68,7 @@ static unsigned long ticks(void){ return *(volatile unsigned long __far *)MK_FP(
 /* ---- options ------------------------------------------------------------- */
 static int o_sock = -1;
 static unsigned o_seg = 0xD000;
+static int o_seg_forced = 0;  /* /SEG given: all-zero page is the user's call */
 static unsigned long o_off = 0, o_len = 0, o_size = 0, o_blk = 0;
 static int o_type = 0, o_lanes = 0, o_vpp = -1;
 static int o_vdiag = 0;       /* /VDIAG: report reg 0x02 on every Vpp change */
@@ -288,6 +289,8 @@ static void detect_w16(void)
 static unsigned settle_ms;              /* how long the gate actually took   */
 static int      settle_allff;           /* accepted an all-FF (blank?) card  */
 static int      settle_allzero;         /* window reads all-00 - see below   */
+static int      win_mismatch;           /* the two windows show different    */
+                                        /* bytes for the same card page      */
 static int      settle_unstable;        /* never held still - reads unsafe   */
 
 static void settle_snap(unsigned char *s)
@@ -305,6 +308,7 @@ static void settle_socket(void)
     unsigned t, k;
     int allff;
     settle_ms = 0; settle_allff = 0; settle_unstable = 0; settle_allzero = 0;
+    win_mismatch = 0;
     settle_snap(a);
     for (t = SETTLE_STEP_MS; t <= SETTLE_CAP_MS; t += SETTLE_STEP_MS) {
         dly(20000);                                  /* ~20ms */
@@ -327,6 +331,14 @@ static void settle_socket(void)
      * zeros satisfy both instantly. */
     for (settle_allzero = 1, k = 0; k < 8; k++)
         if (b[k] != 0x00) { settle_allzero = 0; break; }
+    /* The same card page through both windows must read the same bytes.
+     * A window a memory manager has taken as UMB shows RAM instead - an
+     * MCB, zeros, leftovers - and the two then disagree. This catches the
+     * case the all-zero test cannot: junk in one window, silence in the
+     * other, and a dump that is neither.                                 */
+    setwin(1, 0L, 0); dly(2000);
+    for (k = 0; k < 16; k++)
+        if (*wp8(0, k) != *wp8(1, k)) { win_mismatch = 1; break; }
     cur_pageB = 0xFFFFFFFFL;                         /* snap paged window 1 */
 }
 
@@ -479,13 +491,14 @@ static void parse_cis(int show)
     for (;;) {
         int code, link, i;
         unsigned char body[254];
+        if (off + 2 > (int)sizeof(cisbuf)) break;    /* header must fit    */
         code = cisbuf[off];
-        if (code == 0xFF || off >= (int)sizeof(cisbuf) - 2) break;
+        if (code == 0xFF) break;
         if (code == 0x00) { off++; if (++guard > 256) break; continue; }
         link = cisbuf[off + 1];
         if (link == 0xFF) break;
-        for (i = 0; i < link && (off + 2 + i) < (int)sizeof(cisbuf); i++)
-            body[i] = cisbuf[off + 2 + i];
+        if (off + 2 + link > (int)sizeof(cisbuf)) break; /* body cut short  */
+        for (i = 0; i < link; i++) body[i] = cisbuf[off + 2 + i];
         cis_present = 1;
         switch (code) {
         case 0x01:                                   /* CISTPL_DEVICE       */
@@ -1345,14 +1358,16 @@ static int confirm(void)
  * image does not divide the card - which is what the real ROM would give.
  * Both the write loop and verify_range read through here, so a tiled card
  * is verified against the same wrapped stream it was written from.        */
+static unsigned long verify_done;             /* bytes actually compared */
 static unsigned tread(FILE *f, unsigned char *p, unsigned n)
 {
     unsigned got = fread(p, 1, n, f);
+    if (ferror(f)) return got;                   /* caller sees the short */
     while (got < n && o_tile) {                  /* image < buffer: loop */
         unsigned more;
         rewind(f);
         more = fread(p + got, 1, n - got, f);
-        if (!more) break;                        /* empty file, no spin  */
+        if (!more) break;                        /* empty file or error  */
         got += more;
     }
     return got;
@@ -1384,6 +1399,8 @@ static long verify_range(FILE *f, unsigned long off, unsigned long len,
     }
     printf("\n");
     *first_bad = fb;
+    verify_done = a - off;
+    if (verify_done != len) return -1;           /* file ended or failed */
     return bad;
 }
 
@@ -1402,6 +1419,12 @@ static void show_status(void)
     if (we_powered && settle_ms > SETTLE_STEP_MS)
         printf("  socket settled in %ums%s\n", settle_ms,
                settle_allff ? " (reads all-FF - blank card, or a very slow host)" : "");
+    if (we_powered && win_mismatch)
+        printf("  ! the two windows at %04X and %04X show DIFFERENT bytes for the\n"
+               "    same card page - one of them is host RAM, not the card. A\n"
+               "    memory manager has taken it as UMB. Exclude %04X-%04X (32K,\n"
+               "    JEMM/EMM386 X=) or move LINGO with /SEG.\n",
+               o_seg, o_seg + 0x400, o_seg, o_seg + 0x7FF);
     if (we_powered && settle_allzero)
         printf("  ! this window reads ALL ZEROES on a card that is present and\n"
                "    READY. That is not a blank card - a blank card reads FF. It\n"
@@ -1441,12 +1464,62 @@ static int op_info(void)
     }
     parse_cis(1);
     if (o_probe) {
-        probe_card();
-        show_probe();
+        if (settle_unstable)
+            printf("    PROBE: refused - card memory never held still over %d s,\n"
+                   "           so the bytes a probe saves and restores cannot be\n"
+                   "           trusted. Re-seat the card and retry.\n",
+                   SETTLE_CAP_MS / 1000);
+        else { probe_card(); show_probe(); }
     } else {
         printf("    (add /PROBE to ask the chip itself - it writes ID commands)\n");
     }
     return 0;
+}
+
+/* The 82365 window offset holds 14 page bits, so 64 MB is as far as any
+ * mapping reaches: an address past that wraps silently to the bottom of
+ * the card.  Offsets are tested before lengths and lengths by subtraction,
+ * so nothing here can overflow.  len 0 checks the offset alone.          */
+#define CARD_REACH 0x4000000UL
+static int range_ok(unsigned long off, unsigned long len)
+{
+    unsigned long lim = (card_size && card_size < CARD_REACH) ? card_size : CARD_REACH;
+    if (off >= lim) {
+        if (card_size) printf("  ! offset 0x%lX is past the end of a %luK card\n", off, card_size >> 10);
+        else printf("  ! offset 0x%lX is past the controller's 64 MB reach\n", off);
+        return 0;
+    }
+    if (len > lim - off) {
+        printf("  ! %lu bytes @ 0x%lX run past %s\n", len, off,
+               card_size ? "the end of the card" : "the controller's 64 MB reach");
+        return 0;
+    }
+    return 1;
+}
+
+/* an erase runs whole blocks, so the rounded-out extent must fit as well */
+static int blocks_ok(unsigned long off, unsigned long len)
+{
+    unsigned long lim = (card_size && card_size < CARD_REACH) ? card_size : CARD_REACH;
+    unsigned long end = ((off + len - 1) / blk_bytes + 1) * blk_bytes;
+    if (end > lim) {
+        printf("  ! the last %luK erase block would run past %s\n", blk_bytes >> 10,
+               card_size ? "the end of the card" : "the controller's 64 MB reach");
+        return 0;
+    }
+    return 1;
+}
+
+/* size a file, refusing one that cannot be positioned or measured */
+static int file_len(FILE *f, unsigned long *out)
+{
+    long n;
+    if (fseek(f, 0L, SEEK_END) != 0) return 0;
+    n = ftell(f);
+    if (n < 0) return 0;
+    rewind(f);
+    *out = (unsigned long)n;
+    return 1;
 }
 
 static int op_read(const char *fn)
@@ -1456,15 +1529,17 @@ static int op_read(const char *fn)
     int uniform = 1; unsigned char uval = 0;     /* whole dump one byte? */
     read_cis(); parse_cis(0);
     resolve_geom();                                  /* CIS size / /SIZE    */
-    len = o_len ? o_len : (card_size > o_off ? card_size - o_off : 0);
+    if (!range_ok(o_off, 0)) return 1;               /* the offset first    */
+    len = o_len ? o_len : (card_size ? card_size - o_off : 0);
     if (!len) {
         printf("  ! card size unknown - give /LEN or /SIZE\n");
         return 1;
     }
-    if (card_size && o_off + len > card_size) {
+    if (card_size && len > card_size - o_off) {
         len = card_size - o_off;
         printf("  (clamped to card size: %lu bytes)\n", len);
     }
+    if (!range_ok(o_off, len)) return 1;             /* the 64 MB reach     */
     f = fopen(fn, "wb");
     if (!f) { printf("  ! cannot create %s\n", fn); return 1; }
     printf("  READ %lu bytes @ 0x%lX -> %s\n", len, o_off, fn);
@@ -1492,7 +1567,7 @@ static int op_read(const char *fn)
     else printf("\n  done, CRC-32 %08lX\n", crc_done());
     /* A read that never reached the card still completes and still prints a
      * checksum, so say plainly when the whole dump is one repeated byte.    */
-    if (uniform && len > 1024UL) {
+    if (uniform && len >= 16UL) {
         printf("  ! every byte of this dump is %02X - it carries no data.\n", uval);
         if (uval == 0x00)
             printf("    All-zero means the window is almost certainly not reaching\n"
@@ -1522,6 +1597,8 @@ static int op_write(const char *fn)
         printf("  ! write-protect switch is ON - flip it and retry\n");
         return 1;
     }
+    resolve_geom();                                  /* CIS size / /SIZE    */
+    if (!range_ok(o_off, 0)) return 1;               /* before any ID cmds  */
     probe_card();
     use_buf = (cfi_bufsz >= 2 && (o_off & 63) == 0 && !o_nobuf);
     if (byte_broken && !wide_ok() && ctype != T_SRAM) {
@@ -1535,7 +1612,7 @@ static int op_write(const char *fn)
     }
     f = fopen(fn, "rb");
     if (!f) { printf("  ! cannot open %s\n", fn); return 1; }
-    fseek(f, 0L, SEEK_END); flen = (unsigned long)ftell(f); rewind(f);
+    if (!file_len(f, &flen)) { printf("  ! cannot size %s\n", fn); fclose(f); return 1; }
     len = (o_len && o_len < flen) ? o_len : flen;
     if (!len) { printf("  ! %s is empty\n", fn); fclose(f); return 1; }
     if (o_tile) {
@@ -1554,15 +1631,12 @@ static int op_write(const char *fn)
         o_off = 0;                                   /* a mirror starts at 0 */
         len = card_size;
     }
-    if (card_size && o_off + len > card_size) {
-        printf("  ! %lu bytes @ 0x%lX won't fit a %luK card\n",
-               len, o_off, card_size >> 10);
-        fclose(f); return 1;
-    }
+    if (!range_ok(o_off, len)) { fclose(f); return 1; }
     if (ctype != T_SRAM && !o_noerase && !blk_bytes) {
         printf("  ! erase-block size unknown - give /BLK (or /NOERASE)\n");
         fclose(f); return 1;
     }
+    if (ctype != T_SRAM && !o_noerase && !blocks_ok(o_off, len)) { fclose(f); return 1; }
 
     printf("  PLAN: WRITE %s (%lu bytes) -> card @ 0x%lX\n",
            fn, o_tile ? flen : len, o_off);
@@ -1679,6 +1753,12 @@ static int op_write(const char *fn)
         if (got < n) break;
     }
     printf("\n");
+    if (a - o_off != len) {                      /* file ended or failed */
+        printf("  ! could not read all of %s - %lu of %lu bytes written,"
+               " the card is INCOMPLETE\n", fn, a - o_off, len);
+        read_array_range(o_off, a > o_off ? a - 1 : o_off);
+        vpp_restore(); fclose(f); return 1;
+    }
     read_array_range(o_off, o_off + len - 1);
     vpp_restore();
     printf("  file CRC-32 %08lX\n", crc_done());
@@ -1686,6 +1766,11 @@ static int op_write(const char *fn)
     if (!o_noverify) {
         rewind(f);
         bad = verify_range(f, o_off, len, &fb);
+        if (bad < 0) {
+            printf("  ! VERIFY INCOMPLETE: could not read %s back - %lu of %lu"
+                   " bytes compared\n", fn, verify_done, len);
+            fclose(f); return 1;
+        }
         if (bad) {
             printf("  ! VERIFY FAILED: %ld mismatches, first at 0x%lX\n", bad, fb);
             fclose(f); return 1;
@@ -1709,6 +1794,8 @@ static int op_erase(void)
         printf("  ! write-protect switch is ON - flip it and retry\n");
         return 1;
     }
+    resolve_geom();                                  /* CIS size / /SIZE    */
+    if (!range_ok(o_off, o_all ? 0 : o_len)) return 1; /* before any ID cmds */
     probe_card();
     if (ctype == T_UNKNOWN || ctype == T_ROM || ctype == T_SERIES1) {
         printf("  ! card is %s - cannot erase\n", type_name(ctype));
@@ -1721,6 +1808,7 @@ static int op_erase(void)
         len = o_len;
         if (!len) { printf("  ! give /LEN (or /ALL for the whole card)\n"); return 1; }
     }
+    if (!range_ok(o_off, len)) return 1;
 
     if (ctype == T_SRAM) {
         unsigned long a = o_off, left = len;
@@ -1738,6 +1826,7 @@ static int op_erase(void)
     }
 
     if (!blk_bytes) { printf("  ! erase-block size unknown - give /BLK\n"); return 1; }
+    if (!blocks_ok(o_off, len)) return 1;
     b0 = o_off / blk_bytes;
     b1 = (o_off + len - 1) / blk_bytes;
     printf("  PLAN: ERASE blocks %lu-%lu (%luK each) = 0x%lX..0x%lX, %s x%d, Vpp %dV\n",
@@ -1772,8 +1861,9 @@ static int op_verify(const char *fn)
     resolve_geom();
     f = fopen(fn, "rb");
     if (!f) { printf("  ! cannot open %s\n", fn); return 1; }
-    fseek(f, 0L, SEEK_END); flen = (unsigned long)ftell(f); rewind(f);
+    if (!file_len(f, &flen)) { printf("  ! cannot size %s\n", fn); fclose(f); return 1; }
     len = (o_len && o_len < flen) ? o_len : flen;
+    if (!len) { printf("  ! %s is empty - nothing to verify against\n", fn); fclose(f); return 1; }
     if (o_tile) {
         if (!card_size) {
             printf("  ! /TILE needs the card size - give /SIZE\n");
@@ -1781,10 +1871,16 @@ static int op_verify(const char *fn)
         }
         o_off = 0; len = card_size;
     }
+    if (!range_ok(o_off, len)) { fclose(f); return 1; }
     printf("  VERIFY %s (%lu bytes) vs card @ 0x%lX%s\n",
            fn, o_tile ? flen : len, o_off, o_tile ? " - tiled" : "");
     bad = verify_range(f, o_off, len, &fb);
     fclose(f);
+    if (bad < 0) {
+        printf("  ! could not read all of %s - %lu of %lu bytes compared,"
+               " the rest is UNCHECKED\n", fn, verify_done, len);
+        return 1;
+    }
     if (bad) {
         printf("  ! %ld mismatches, first at 0x%lX\n", bad, fb);
         return 1;
@@ -1963,7 +2059,16 @@ int main(int argc, char **argv)
             else if (!stricmp(a, "LEN"))  { if (i+1 < argc) o_len  = parsenum(argv[++i]); }
             else if (!stricmp(a, "SIZE")) { if (i+1 < argc) o_size = parsenum(argv[++i]); }
             else if (!stricmp(a, "BLK"))  { if (i+1 < argc) o_blk  = parsenum(argv[++i]); }
-            else if (!stricmp(a, "SEG"))  { if (i+1 < argc) o_seg  = (unsigned)strtoul(argv[++i], NULL, 16); }
+            else if (!stricmp(a, "SEG"))  {
+                unsigned long v = 0; char *e = "";
+                if (i+1 < argc) v = strtoul(argv[++i], &e, 16);
+                /* two 16 K windows on 4 K pages, in upper memory, no wrap  */
+                if (*e || (v & 0xFF) || v < 0xA000UL || v > 0xF800UL) {
+                    printf("/SEG takes a page-aligned upper-memory segment, A000-F800 (e.g. D000)\n");
+                    return 1;
+                }
+                o_seg = (unsigned)v; o_seg_forced = 1;
+            }
             else if (!stricmp(a, "VPP"))  {
                 if (i+1 < argc) o_vpp = atoi(argv[++i]);
                 if (o_vpp != 0 && o_vpp != 5 && o_vpp != 12) {
@@ -2008,10 +2113,14 @@ int main(int argc, char **argv)
         printf("that command needs a filename\n"); usage(); return 1;
     }
 
-    printf("LINGO 1.11 - linear flash / SRAM card reader-writer\n");
+    printf("LINGO 1.12 - linear flash / SRAM card reader-writer\n");
 
     crc_init();
 
+    if (o_size > CARD_REACH) {
+        printf("/SIZE %luK is beyond the controller's 64 MB reach\n", o_size >> 10);
+        return 1;
+    }
     if (cmd == C_INFO) {
         for (sock = 0; sock < 8; sock++) {
             if (o_sock >= 0 && sock != o_sock) continue;
@@ -2049,6 +2158,11 @@ int main(int argc, char **argv)
     /* Never probe or write a card whose reads would not hold still: the live
      * probe saves the bytes it clobbers and writes them back, so an unstable
      * read turns that restore into corruption of the user's card.           */
+    if (win_mismatch || (settle_allzero && !o_seg_forced)) {
+        printf("  ! refusing: the window is not reaching the card (see above).\n");
+        close_socket();
+        return 1;
+    }
     if (settle_unstable) {
         printf("  ! card memory never held still over %d s - reads are not\n"
                "    trustworthy, so probing and writing are refused. Re-seat\n"

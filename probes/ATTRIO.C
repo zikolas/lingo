@@ -151,11 +151,13 @@ int main(int argc, char **argv)
         else if (!stricmp(a, "/W") && i + 1 < (unsigned)argc) memseg = (unsigned)strtol(argv[++i], 0, 16);
         else if (!stricmp(a, "/LEN") && i + 1 < (unsigned)argc) len = (unsigned)atoi(argv[++i]);
     }
-    if (!mode || len > MAXLEN) {
+    if (!mode || len > MAXLEN || blank == 0 || blank > MAXLEN) {
         printf("ATTRIO - PC Card attribute memory read/blank/restore\n"
                "  ATTRIO SAVE file | BLANK [n] | LOAD file  [/S n] [/W hex] [/LEN n]\n"
+               "  n and /LEN: 1-%u dense bytes\n"
                "  /S n = socket 0-7 (chip 3E0+(n&~1), bank n&1); default: first with a card\n"
-               "  ALWAYS SAVE before BLANK. Every write is verified by readback.\n");
+               "  ALWAYS SAVE before BLANK. Every write is verified by readback.\n",
+               MAXLEN);
         return 1;
     }
     {   /* find the socket: the named one, else the first holding a card */
